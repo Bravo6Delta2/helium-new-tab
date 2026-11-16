@@ -1,18 +1,6 @@
 const CONFIG = {
   hour12: false,
 
-  search: {
-    engine: "https://www.google.com/search?q=%s",
-    // Bangs come from Helium's own list (the one its address bar uses).
-    // A bang that isn't in it is passed to DuckDuckGo, which knows a few thousand more.
-    bangList: "https://services.helium.imput.net/bangs.json",
-    unknownBang: "https://duckduckgo.com/?q=%s",
-  },
-  // Your own bangs. These win over Helium's list, e.g.
-  // cl: ["Claude", "https://claude.ai/new?q=%s"],
-  bangs: {
-  },
-
   cities: [
     { name: "Nikšić",    lat: 42.7731, lon: 18.9445 },
     { name: "Podgorica", lat: 42.4411, lon: 19.2636 },
@@ -29,7 +17,6 @@ const fmtTime = (d) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: 
 
 // Tabler icons (MIT), the set Prism uses. Only the path data, wrapped by icon().
 const ICONS = {
-  "search": '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M21 21l-6 -6"/>',
   "sun": '<path d="M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/>',
   "moon": '<path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454l0 .008"/>',
   "cloud": '<path d="M6.657 18c-2.572 0 -4.657 -2.007 -4.657 -4.483c0 -2.475 2.085 -4.482 4.657 -4.482c.393 -1.762 1.794 -3.2 3.675 -3.773c1.88 -.572 3.956 -.193 5.444 1c1.488 1.19 2.162 3.007 1.77 4.769h.99c1.913 0 3.464 1.56 3.464 3.486c0 1.927 -1.551 3.487 -3.465 3.487h-11.878"/>',
@@ -42,8 +29,6 @@ const ICONS = {
   "droplet": '<path d="M7.502 19.423c2.602 2.105 6.395 2.105 8.996 0c2.602 -2.105 3.262 -5.708 1.566 -8.546l-4.89 -7.26c-.42 -.625 -1.287 -.803 -1.936 -.397a1.376 1.376 0 0 0 -.41 .397l-4.893 7.26c-1.695 2.838 -1.035 6.441 1.567 8.546"/>',
   "sunrise": '<path d="M3 17h1m16 0h1m-15.4 -6.4l.7 .7m12.1 -.7l-.7 .7m-9.7 5.7a4 4 0 0 1 8 0"/><path d="M3 21l18 0"/><path d="M12 9v-6l3 3m-6 0l3 -3"/>',
   "sunset": '<path d="M3 13h1"/><path d="M20 13h1"/><path d="M5.6 6.6l.7 .7"/><path d="M18.4 6.6l-.7 .7"/><path d="M8 13a4 4 0 1 1 8 0"/><path d="M3 17h18"/><path d="M7 20h5"/><path d="M16 20h1"/><path d="M12 5v-1"/>',
-  // Prism's own IconBang
-  "bang": '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M21 21l-6 -6"/><path d="M10 13v.01"/><path d="M10 7v3"/>',
 };
 const icon = (name, size = 18) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -60,136 +45,6 @@ function tick() {
   setTimeout(tick, 1000 - now.getMilliseconds());
 }
 tick();
-
-/* ---------- search + bangs ---------- */
-const q = $("q");
-$("search-icon").innerHTML = icon("search");
-
-function fill(template, terms) {
-  return template.replace("%s", encodeURIComponent(terms));
-}
-
-function findBang(text) {
-  // A bang can sit anywhere, like DuckDuckGo: "!yt lofi" or "lofi !yt"
-  const m = text.match(/(?:^|\s)!(\S+)/);
-  return m ? { key: m[1].toLowerCase(), terms: (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim() } : null;
-}
-
-function looksLikeUrl(text) {
-  return /^[a-z][\w+.-]*:\/\//i.test(text)
-    || /^localhost(:\d+)?(\/\S*)?$/i.test(text)
-    || /^[\w-]+(\.[\w-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i.test(text);
-}
-
-// Helium's list is Kagi's bangs plus Helium's extras. "f" holds Kagi's format flags.
-const BANGS_TTL = 24 * 3_600_000;
-const FLAG = { OPEN_BASE_PATH: 1, OPEN_SNAP_DOMAIN: 2, ENCODE: 4, SPACE_TO_PLUS: 8 };
-let heliumBangs = null; // Map of trigger -> { s: name, u: url template, f: flags }
-
-function indexBangs(list) {
-  const map = new Map();
-  for (const b of list) for (const t of b.ts) map.set(t, b);
-  return map;
-}
-
-async function loadHeliumBangs() {
-  const cached = store.get("bangs");
-  if (cached) heliumBangs = indexBangs(cached.list);
-  if (cached && Date.now() - cached.at < BANGS_TTL) return;
-  try {
-    const res = await fetch(CONFIG.search.bangList);
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    // The file is JSON with a license header in // comments and trailing commas
-    const text = (await res.text()).replace(/^\/\/.*$/gm, "").replace(/,(\s*[\]}])/g, "$1");
-    const list = JSON.parse(text).map(({ s, ts, u, f }) => ({ s, ts, u, f }));
-    store.set("bangs", { at: Date.now(), list });
-    heliumBangs = indexBangs(list);
-  } catch {
-    // Keep whatever was cached; unknown bangs still work through DuckDuckGo
-  }
-}
-const bangsLoading = loadHeliumBangs();
-
-function lookupBang(key) {
-  const own = CONFIG.bangs[key];
-  if (own) return { s: own[0], u: own[1].replace("%s", "{searchTerms}") };
-  return heliumBangs?.get(key) || null;
-}
-
-function runBang(bang, terms) {
-  const f = bang.f ?? 15; // no flags given means all of them are on
-  if (!terms) {
-    try {
-      const url = new URL(bang.u.replace("{searchTerms}", ""));
-      return f & (FLAG.OPEN_BASE_PATH | FLAG.OPEN_SNAP_DOMAIN) ? url.origin : url.href;
-    } catch {
-      return null;
-    }
-  }
-  let q = terms;
-  if (f & FLAG.ENCODE) q = encodeURIComponent(q);
-  if (f & FLAG.SPACE_TO_PLUS) q = q.replace(/%20| /g, "+");
-  return bang.u.replace("{searchTerms}", q);
-}
-
-function resolve(raw) {
-  const text = raw.trim();
-  if (!text) return null;
-  const bang = findBang(text);
-  if (bang) {
-    const known = lookupBang(bang.key);
-    if (!known) return fill(CONFIG.search.unknownBang, text);
-    const url = runBang(known, bang.terms);
-    if (url) return url;
-  }
-  if (looksLikeUrl(text)) {
-    if (/^[a-z][\w+.-]*:\/\//i.test(text)) return text;
-    return (/^localhost\b/i.test(text) ? "http://" : "https://") + text;
-  }
-  return fill(CONFIG.search.engine, text);
-}
-
-function updateBangHint() {
-  const bang = findBang(q.value);
-  let label = "";
-  if (bang?.key) label = lookupBang(bang.key)?.s ?? (heliumBangs ? `!${bang.key} via DuckDuckGo` : "");
-  $("bang-chip").textContent = label;
-  $("search-icon").innerHTML = icon(bang?.key ? "bang" : "search");
-}
-q.addEventListener("input", updateBangHint);
-
-q.addEventListener("keydown", async (e) => {
-  if (e.key === "Escape") { q.value = ""; updateBangHint(); }
-  if (e.key === "Enter") {
-    e.preventDefault();
-    // On the very first run the list may still be downloading. Give it a moment.
-    if (!heliumBangs && findBang(q.value)) await Promise.race([bangsLoading, new Promise((r) => setTimeout(r, 1500))]);
-    const url = resolve(q.value);
-    if (!url) return;
-    shimmer.emphasize();
-    if (e.metaKey || e.ctrlKey) window.open(url, "_blank");
-    else location.href = url;
-  }
-});
-$("search").addEventListener("submit", (e) => e.preventDefault());
-
-// Focus the search box on open, and send stray typing to it
-function focusSearch() { if (document.activeElement !== q) q.focus({ preventScroll: true }); }
-focusSearch();
-addEventListener("pageshow", focusSearch);
-// Fires when the page gets keyboard focus back from the address bar (e.g. Esc).
-// Skipped when a click caused it, so clicking a weather pill doesn't jump to search.
-let lastPointerDown = 0;
-addEventListener("pointerdown", () => { lastPointerDown = performance.now(); }, true);
-addEventListener("focus", () => {
-  setTimeout(() => { if (performance.now() - lastPointerDown > 300) focusSearch(); }, 50);
-});
-document.addEventListener("visibilitychange", () => { if (!document.hidden) focusSearch(); });
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closePanels();
-  if (e.target === q || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key.length === 1 || e.key === "Backspace") focusSearch();
-});
 
 /* ---------- weather (Open-Meteo) ---------- */
 const WEATHER_TTL = 15 * 60_000;
@@ -338,6 +193,7 @@ const cards = CONFIG.cities.map((city, i) => {
   return el;
 });
 document.addEventListener("click", (e) => { if (!e.target.closest(".wx")) closePanels(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanels(); });
 
 async function loadWeather() {
   try {
