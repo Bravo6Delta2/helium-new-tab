@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "name": "New Tab",
   "version": "1.0.0",
-  "description": "Clock, search with bangs, weather, world clocks and uBlock Origin stats.",
+  "description": "Clock, search with bangs and suggestions, weather, world clocks and uBlock Origin stats.",
   "chrome_url_overrides": { "newtab": "index.html" },
   "background": { "service_worker": "background.js" },
-  "permissions": ["storage", "webRequest"],
+  "permissions": ["storage", "webRequest", "history", "bookmarks", "favicon"],
   "host_permissions": ["<all_urls>"]
 }

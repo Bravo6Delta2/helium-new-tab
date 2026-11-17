@@ -208,6 +208,30 @@
   }
   .bang-chip:empty { display: none; }
 
+  /* Suggestions under the search box: bangs, or pages from history and bookmarks */
+  #search { position: relative; z-index: 1; }
+  .suggest {
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px);
+    margin: 0; padding: 4px;
+    list-style: none; text-align: left;
+    border-radius: var(--mid-border-radius);
+    background: var(--bg-surface);
+    outline: 1.5px solid var(--helium-elevated-10); outline-offset: -1.5px;
+    box-shadow: 4px 8px 30px 0 var(--tooltip-shadow);
+    cursor: default;
+  }
+  .suggest:empty { display: none; }
+  .suggest li { display: flex; align-items: center; gap: 12px; padding: 9px 10px; border-radius: 8px; cursor: pointer; }
+  .suggest li.active { background: var(--helium-elevated-10); }
+  .suggest .fav { display: inline-flex; flex: none; width: 16px; height: 16px; color: var(--tertiary); }
+  .suggest .txt { display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0; }
+  .suggest .title, .suggest small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .suggest .title { flex: 0 1 auto; max-width: 75%; font-size: 15px; color: var(--secondary); }
+  .suggest .title b { font-weight: inherit; color: var(--primary); }
+  .suggest small { flex: 1 1 0; min-width: 0; font-size: 13px; color: var(--tertiary); }
+  .suggest .tag { flex: none; padding: 2px 9px; border-radius: 999px; background: var(--helium-elevated-15); font-size: 12px; }
+  .suggest .mark { display: inline-flex; flex: none; color: var(--tertiary); }
+
   /* Prism Button, used for the weather pills */
   .button {
     display: inline-flex; align-items: center; gap: 7px;
@@ -452,8 +476,10 @@
 
   <form class="input-field" id="search" role="search">
     <span class="accessory" id="search-icon"></span>
-    <input id="q" type="search" placeholder="Search or type a !bang" aria-label="Search" autocomplete="off" spellcheck="false">
+    <input id="q" type="search" placeholder="Search or type a !bang" aria-label="Search" autocomplete="off" spellcheck="false"
+      role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="suggest">
     <span class="bang-chip" id="bang-chip"></span>
+    <ul class="suggest" id="suggest" role="listbox" aria-label="Suggestions"></ul>
   </form>
 </main>
 

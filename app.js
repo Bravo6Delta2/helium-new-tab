@@ -80,6 +80,8 @@ const ICONS = {
   // Prism's own IconBang
   "bang": '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M21 21l-6 -6"/><path d="M10 13v.01"/><path d="M10 7v3"/>',
   "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>',
+  "world": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M3.6 9h16.8"/><path d="M3.6 15h16.8"/><path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/>',
+  "bookmark": '<path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"/>',
   "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
   "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
   "map-pin": '<path d="M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/><path d="M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0z"/>',
@@ -159,7 +161,8 @@ function looksLikeUrl(text) {
 // left to the browser's HTTP cache (the server allows a day, then revalidates by ETag),
 // and only fetched once a bang is typed.
 const FLAG = { OPEN_BASE_PATH: 1, OPEN_SNAP_DOMAIN: 2, ENCODE: 4, SPACE_TO_PLUS: 8 };
-let heliumBangs = null; // Map of trigger -> { s: name, u: url template, f: flags }
+let heliumBangs = null; // Map of trigger -> { s: name, ts: [trigger], u: url template, f: flags }
+let heliumBangList = []; // The same bangs in a list, for suggestions
 let bangsLoading = null;
 
 // Older versions kept a second copy in localStorage
@@ -172,10 +175,12 @@ function loadHeliumBangs() {
       if (!res.ok) throw new Error("HTTP " + res.status);
       // The file is JSON with a license header in // comments and trailing commas
       const text = (await res.text()).replace(/^\/\/.*$/gm, "").replace(/,(\s*[\]}])/g, "$1");
-      const map = new Map();
-      for (const b of JSON.parse(text)) for (const t of b.ts) map.set(t, b);
+      const list = JSON.parse(text), map = new Map();
+      for (const b of list) for (const t of b.ts) map.set(t, b);
       heliumBangs = map;
+      heliumBangList = list;
       updateBangHint();
+      if (document.activeElement === q) updateSuggestions();
     } catch {
       // Unknown bangs still work through DuckDuckGo. Try again on the next bang.
       bangsLoading = null;
@@ -231,20 +236,187 @@ function updateBangHint() {
   $("bang-chip").textContent = label;
   $("search-icon").innerHTML = icon(bang?.key ? "bang" : "search");
 }
-q.addEventListener("input", updateBangHint);
+q.addEventListener("input", () => { updateBangHint(); updateSuggestions(); });
+
+function go(url, newTab) {
+  shimmer.emphasize();
+  // A page can't open chrome:// and the like itself, but the tabs API can
+  if (!/^https?:/i.test(url) && globalThis.chrome?.tabs) {
+    if (newTab) chrome.tabs.create({ url });
+    else chrome.tabs.update({ url });
+  } else if (newTab) window.open(url, "_blank");
+  else location.href = url;
+}
 
 q.addEventListener("keydown", async (e) => {
-  if (e.key === "Escape") { q.value = ""; updateBangHint(); q.blur(); }
-  if (e.key === "Enter") {
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && rows.length) {
     e.preventDefault();
+    // -1 is the text as typed, between the last row and the first
+    const n = rows.length + 1;
+    active = ((active + 1 + (e.key === "ArrowDown" ? 1 : -1) + n) % n) - 1;
+    paintSuggestions();
+  } else if (e.key === "Tab" && !e.shiftKey && rows[0]?.bang) {
+    e.preventDefault();
+    pick(rows[Math.max(active, 0)]);
+  } else if (e.key === "Escape") {
+    // Close the suggestions first, then clear the box. A search box clears itself on Escape.
+    if (rows.length) { e.preventDefault(); return closeSuggestions(); }
+    q.value = ""; updateBangHint(); q.blur();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (rows[active]) return pick(rows[active], e.metaKey || e.ctrlKey);
     // The list may still be loading. Give it a moment.
     if (!heliumBangs && findBang(q.value)) await Promise.race([loadHeliumBangs(), new Promise((r) => setTimeout(r, 1500))]);
     const url = resolve(q.value);
-    if (!url) return;
-    shimmer.emphasize();
-    if (e.metaKey || e.ctrlKey) window.open(url, "_blank");
-    else location.href = url;
+    if (url) go(url, e.metaKey || e.ctrlKey);
   }
+});
+
+/* ---------- suggestions ---------- */
+// Bangs while one is being typed, otherwise pages from history and bookmarks.
+// Nothing is picked until an arrow key says so, so Enter still searches what was typed.
+const suggest = $("suggest");
+const SUGGEST_MAX = 6;
+let rows = [], active = -1, suggestSeq = 0;
+
+// The "!yt" the caret is in, if any
+function caretBang() {
+  const end = q.value.slice(q.selectionStart).match(/^\S*/)[0].length + q.selectionStart;
+  const m = q.value.slice(0, end).match(/(?:^|\s)!(\S+)$/);
+  return m ? { prefix: m[1].toLowerCase(), start: end - m[1].length - 1, end } : null;
+}
+
+// Bangs with a trigger starting with prefix. Kagi's list has no popularity, so an exact
+// match comes first, then shorter triggers, then bangs with more aliases (YouTube has 9).
+function matchBangs(prefix) {
+  const own = Object.entries(CONFIG.bangs)
+    .filter(([t]) => t.startsWith(prefix))
+    .map(([t, [s, u]]) => ({ t, s, u, n: Infinity }));
+  const found = [];
+  for (const b of heliumBangList) {
+    let t = null;
+    for (const x of b.ts) if (x.startsWith(prefix) && (!t || x.length < t.length)) t = x;
+    // Your own bangs win over Helium's for the same trigger
+    if (t && !CONFIG.bangs[t]) found.push({ t, s: b.s, u: b.u, n: b.ts.length });
+  }
+  return [...own, ...found]
+    .sort((a, b) => (b.t === prefix) - (a.t === prefix) || a.t.length - b.t.length || b.n - a.n)
+    .slice(0, SUGGEST_MAX)
+    .map((b) => ({ bang: b.t, title: b.s, url: b.u.replace(/\{searchTerms\}|%s/, "") }));
+}
+
+// Result pages of the engines in Settings, which would crowd out the pages themselves
+const isSearchPage = (url) => Object.values(CONFIG.search.engines).some((e) => url.startsWith(e.slice(0, e.indexOf("%s"))));
+const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; } };
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+async function matchPages(text) {
+  const [visits, marks] = await Promise.all([
+    chrome.history.search({ text, startTime: 0, maxResults: 100 }),
+    chrome.bookmarks ? chrome.bookmarks.search(text).catch(() => []) : [],
+  ]);
+  const byUrl = new Map();
+  for (const h of visits) byUrl.set(h.url, { url: h.url, title: h.title, weight: h.typedCount * 3 + h.visitCount });
+  for (const b of marks) {
+    if (!b.url) continue; // a folder
+    const page = byUrl.get(b.url) ?? { url: b.url, weight: 0 };
+    byUrl.set(b.url, { ...page, title: b.title || page.title, bookmark: true });
+  }
+  // Pages whose site starts with what was typed first, then a word in the title
+  const first = text.toLowerCase().split(/\s+/)[0];
+  const word = new RegExp("(^|\\W)" + reEscape(first), "i");
+  const tier = (p) => hostOf(p.url).startsWith(first) ? 0 : word.test(p.title) ? 1 : 2;
+  return [...byUrl.values()]
+    .filter((p) => !/^(javascript|chrome-extension):/i.test(p.url) && !isSearchPage(p.url))
+    .map((p) => ({ ...p, tier: tier(p) }))
+    .sort((a, b) => a.tier - b.tier || (b.bookmark ?? 0) - (a.bookmark ?? 0) || b.weight - a.weight)
+    .slice(0, SUGGEST_MAX);
+}
+
+async function updateSuggestions() {
+  const seq = ++suggestSeq;
+  const text = q.value.trim(), token = caretBang();
+  let next = [];
+  if (token) next = matchBangs(token.prefix);
+  // Opened as a plain file:// page there's no history to search
+  else if (text && !findBang(text) && globalThis.chrome?.history) next = await matchPages(text).catch(() => []);
+  // A newer keystroke may have finished first
+  if (seq !== suggestSeq || document.activeElement !== q) return;
+  rows = next;
+  active = -1;
+  paintSuggestions();
+}
+
+function closeSuggestions() {
+  suggestSeq++;
+  rows = [];
+  active = -1;
+  paintSuggestions();
+}
+
+// Text with the typed words in bold
+function mark(text, words) {
+  words = words.filter(Boolean);
+  if (!words.length) return esc(text);
+  let out = "", last = 0;
+  for (const m of text.matchAll(new RegExp(words.map(reEscape).join("|"), "gi"))) {
+    out += esc(text.slice(last, m.index)) + `<b>${esc(m[0])}</b>`;
+    last = m.index + m[0].length;
+  }
+  return out + esc(text.slice(last));
+}
+
+// Chrome's favicon cache, which only extension pages can reach
+const favicon = (url) => globalThis.chrome?.runtime?.id
+  ? `<img class="fav" src="${esc(chrome.runtime.getURL("/_favicon/?pageUrl=" + encodeURIComponent(url) + "&size=32"))}" alt="">`
+  : `<span class="fav">${icon("world", 16)}</span>`;
+const prettyUrl = (url) => url.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, "");
+
+function paintSuggestions() {
+  const words = rows[0]?.bang ? [] : q.value.trim().split(/\s+/);
+  suggest.innerHTML = rows.map((r, i) => `
+    <li role="option" id="sg-${i}" data-i="${i}" class="${i === active ? "active" : ""}" aria-selected="${i === active}">
+      ${favicon(r.url)}
+      <span class="txt"><span class="title">${mark(r.title || prettyUrl(r.url), words)}</span><small>${esc(r.bang ? hostOf(r.url) : prettyUrl(r.url))}</small></span>
+      ${r.bang ? `<span class="tag">!${esc(r.bang)}</span>` : r.bookmark ? `<span class="mark" title="Bookmark">${icon("bookmark", 16)}</span>` : ""}
+    </li>`).join("");
+  q.setAttribute("aria-expanded", rows.length > 0);
+  if (rows[active]) q.setAttribute("aria-activedescendant", "sg-" + active);
+  else q.removeAttribute("aria-activedescendant");
+}
+
+function pick(row, newTab) {
+  if (!row.bang) return go(row.url, newTab);
+  // Swap the half-typed bang for the whole one, ready for the search terms
+  const token = caretBang();
+  if (!token) return;
+  const before = q.value.slice(0, token.start), after = q.value.slice(token.end).trimStart();
+  q.value = `${before}!${row.bang} ${after}`;
+  const caret = before.length + row.bang.length + 2;
+  q.setSelectionRange(caret, caret);
+  updateBangHint();
+  updateSuggestions();
+}
+
+q.addEventListener("focus", updateSuggestions);
+q.addEventListener("blur", closeSuggestions);
+// Moving the caret in or out of a bang changes what's suggested
+q.addEventListener("click", updateSuggestions);
+q.addEventListener("keyup", (e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) updateSuggestions(); });
+// mousedown would blur the box and clear the list before the click lands
+suggest.addEventListener("mousedown", (e) => e.preventDefault());
+suggest.addEventListener("mousemove", (e) => {
+  const i = Number(e.target.closest("[data-i]")?.dataset.i ?? active);
+  if (i !== active) { active = i; paintSuggestions(); }
+});
+// A middle click opens a page in a new tab, like a link
+suggest.addEventListener("click", (e) => {
+  const li = e.target.closest("[data-i]");
+  if (li) pick(rows[li.dataset.i], e.metaKey || e.ctrlKey);
+});
+suggest.addEventListener("auxclick", (e) => {
+  const li = e.target.closest("[data-i]");
+  if (li && e.button === 1 && !rows[li.dataset.i].bang) pick(rows[li.dataset.i], true);
 });
 $("search").addEventListener("submit", (e) => e.preventDefault());
 
