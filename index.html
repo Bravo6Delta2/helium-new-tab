@@ -161,6 +161,42 @@
   }
   .date { margin-top: 14px; font-size: clamp(18px, 2.8vh, 24px); color: var(--secondary); }
 
+  /* Prism Input / SearchBar */
+  .input-field {
+    display: flex; align-items: center; gap: 9px;
+    width: min(560px, 100%); min-height: 46px; margin-top: 36px;
+    padding: 13px 16px;
+    border-radius: var(--mid-border-radius);
+    background: var(--helium-elevated-9);
+    backdrop-filter: var(--glass-filter);
+    color: var(--primary);
+    cursor: text;
+    transition: 0.2s background-color, 0.1s outline-color;
+  }
+  .input-field:hover { background: var(--helium-elevated-10); }
+  .input-field:focus-within { background: var(--helium-elevated-10); outline: 2px solid var(--primary); outline-offset: -1px; }
+  .input-field .accessory { display: inline-flex; color: var(--tertiary); }
+  .input-field:focus-within .accessory { color: var(--primary); }
+  .input-field input {
+    flex: 1; min-width: 0; padding: 0;
+    border: 0; outline: 0; background: none;
+    color: inherit; font: inherit; font-size: 16px; line-height: 122%; letter-spacing: inherit;
+  }
+  .input-field input::placeholder { color: var(--tertiary); }
+  .input-field input::-webkit-search-decoration,
+  .input-field input::-webkit-search-cancel-button { -webkit-appearance: none; }
+  .bang-chip {
+    padding: 3px 10px;
+    /* The negative margin keeps the chip from adding to the field's height */
+    margin-block: -3px;
+    border-radius: 999px;
+    background: var(--helium-elevated-15);
+    color: var(--primary);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .bang-chip:empty { display: none; }
+
   /* Prism Button, used for the weather pills */
   .button {
     display: inline-flex; align-items: center; gap: 7px;
@@ -257,6 +293,12 @@
 <main class="app">
   <div class="time" id="time"></div>
   <div class="date" id="date"></div>
+
+  <form class="input-field" id="search" role="search">
+    <span class="accessory" id="search-icon"></span>
+    <input id="q" type="search" placeholder="Search or type a !bang" aria-label="Search" autocomplete="off" spellcheck="false">
+    <span class="bang-chip" id="bang-chip"></span>
+  </form>
 </main>
 
 <section class="weather" id="weather"></section>
