@@ -167,6 +167,9 @@
     font-variant-numeric: tabular-nums;
   }
   .date { margin-top: 14px; font-size: clamp(18px, 2.8vh, 24px); color: var(--secondary); }
+  /* app.js fills these, and the browser can paint once before it runs. Reserving a
+     line each keeps the search bar from jumping on reload. */
+  .time, .date { min-height: 1lh; }
 
   /* Prism Input / SearchBar */
   .input-field {
@@ -182,7 +185,7 @@
   }
   .input-field:hover { background: var(--helium-elevated-10); }
   .input-field:focus-within { background: var(--helium-elevated-10); outline: 2px solid var(--primary); outline-offset: -1px; }
-  .input-field .accessory { display: inline-flex; color: var(--tertiary); }
+  .input-field .accessory { display: inline-flex; min-width: 18px; min-height: 18px; color: var(--tertiary); }
   .input-field:focus-within .accessory { color: var(--primary); }
   .input-field input {
     flex: 1; min-width: 0; padding: 0;
