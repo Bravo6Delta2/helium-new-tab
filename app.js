@@ -82,6 +82,7 @@ const ICONS = {
   "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>',
   "world": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M3.6 9h16.8"/><path d="M3.6 15h16.8"/><path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/>',
   "bookmark": '<path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"/>',
+  "activity": '<path d="M3 12h4l3 8l4 -16l3 8h4"/>',
   "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
   "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
   "map-pin": '<path d="M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/><path d="M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0z"/>',
@@ -381,6 +382,7 @@ function paintSuggestions() {
       ${r.bang ? `<span class="tag">!${esc(r.bang)}</span>` : r.bookmark ? `<span class="mark" title="Bookmark">${icon("bookmark", 16)}</span>` : ""}
     </li>`).join("");
   q.setAttribute("aria-expanded", rows.length > 0);
+  if (rows.length) closePanels();
   if (rows[active]) q.setAttribute("aria-activedescendant", "sg-" + active);
   else q.removeAttribute("aria-activedescendant");
 }
@@ -776,6 +778,209 @@ if (globalThis.chrome?.storage) {
   document.addEventListener("visibilitychange", showUblock);
 }
 
+/* ---------- browsing activity ---------- */
+// Like Vivaldi's: visits per day, the busiest hour, top sites and how pages were reached,
+// all from the browser's history. History records visits, not time spent on a page.
+// [id, label]. "typed" is the address bar, typing or picking a suggestion. "other" also
+// holds redirects, start pages and form posts.
+const HOW = [["typed", "Typed"], ["links", "Links"], ["bookmarks", "Bookmarks"], ["other", "Other"]];
+const howOf = (transition) =>
+  ["typed", "generated", "keyword", "keyword_generated"].includes(transition) ? 0
+    : transition === "link" ? 1
+    : transition === "auto_bookmark" ? 2
+    : 3;
+// Chrome keeps 90 days of history
+const ACTIVITY_DAYS = 90;
+// Deleted history only shows up on a full rebuild, so one happens daily
+const ACTIVITY_REBUILD = 24 * 3600_000;
+let activityPeriod = PERIODS.find(([id]) => id === store.get("activity:period"))?.[0] ?? "7d";
+// Days per bar, so each period has 7 to 15 bars. Today has 12 bars of two hours.
+const GROUP = { "7d": 1, "30d": 2, "90d": 6 };
+
+const activity = $("activity");
+activity.innerHTML = `
+  <div class="panel">
+    <div class="p-head"><h5>Browsing activity</h5><div class="seg" role="group" aria-label="Period">
+      ${PERIODS.map(([id, label]) => `<button type="button" data-period="${id}">${label}</button>`).join("")}
+    </div></div>
+    <div class="report"></div>
+  </div>
+  <button class="button pill" type="button" aria-expanded="false">${icon("activity")}<strong></strong>visits</button>`;
+bindPanel(activity);
+activity.querySelector(".seg").addEventListener("click", (e) => {
+  const id = e.target.closest("[data-period]")?.dataset.period;
+  if (!id) return;
+  activityPeriod = id;
+  store.set("activity:period", id);
+  renderActivity();
+});
+
+// Visits summed per local day, kept in localStorage and topped up with what's new since
+// "until": { v, built, until, days: { "YYYY-MM-DD": { n, hours: [24], how: [HOW], sites: { host: n } } } }
+let activityData = null, activityLoading = null, activityReset = 0;
+
+function loadActivity() {
+  activityLoading ??= (async () => {
+    try {
+      const now = Date.now();
+      let data = store.get("activity");
+      if (data?.v !== 1 || now - data.built > ACTIVITY_REBUILD || data.built < activityReset) {
+        data = { v: 1, built: now, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime(), days: {} };
+      }
+      // Every page visited since, then each one's visits. Reloads aren't new visits.
+      const pages = await chrome.history.search({ text: "", startTime: data.until, endTime: now, maxResults: 1_000_000 });
+      for (let i = 0; i < pages.length; i += 200) {
+        const batch = pages.slice(i, i + 200).filter((p) => /^https?:/i.test(p.url));
+        const visits = await Promise.all(batch.map((p) => chrome.history.getVisits({ url: p.url })));
+        batch.forEach((p, j) => {
+          const host = hostOf(p.url);
+          for (const v of visits[j]) {
+            if (v.visitTime <= data.until || v.visitTime > now || v.transition === "reload") continue;
+            const at = new Date(v.visitTime);
+            const d = data.days[dayOf(at)] ??= { n: 0, hours: Array(24).fill(0), how: HOW.map(() => 0), sites: {} };
+            d.n++;
+            d.hours[at.getHours()]++;
+            d.how[howOf(v.transition)]++;
+            d.sites[host] = (d.sites[host] ?? 0) + 1;
+          }
+        });
+      }
+      data.until = now;
+      const oldest = daysAgo(ACTIVITY_DAYS - 1);
+      for (const day in data.days) if (day < oldest) delete data.days[day];
+      store.set("activity", data);
+      activityData = data;
+      renderActivity();
+    } catch {
+      // History is unavailable. The pill stays as it was, and the next tab tries again.
+    } finally {
+      activityLoading = null;
+    }
+  })();
+  return activityLoading;
+}
+
+const hourLabel = (h) => settings.hour12 ? `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}` : `${String(h).padStart(2, "0")}:00`;
+
+function renderActivity() {
+  if (!activityData || document.hidden) return;
+  const [, , length] = PERIODS.find(([id]) => id === activityPeriod);
+  const dayList = Array.from({ length }, (_, i) => daysAgo(length - 1 - i));
+  const empty = { n: 0, hours: Array(24).fill(0), how: HOW.map(() => 0), sites: {} };
+  const days = dayList.map((day) => activityData.days[day] ?? empty);
+
+  const total = days.reduce((n, d) => n + d.n, 0);
+  const hours = Array(24).fill(0), how = HOW.map(() => 0), sites = {};
+  for (const d of days) {
+    d.hours.forEach((n, h) => { hours[h] += n; });
+    d.how.forEach((n, k) => { how[k] += n; });
+    for (const [host, n] of Object.entries(d.sites)) sites[host] = (sites[host] ?? 0) + n;
+  }
+  const peak = hours.indexOf(Math.max(...hours));
+  const top = Object.entries(sites).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+  // Bars of { n, label, now }. Today is all one day, so its hours come straight from it.
+  let bars, axis;
+  if (length === 1) {
+    const hour = new Date().getHours();
+    bars = Array.from({ length: 12 }, (_, i) => ({
+      n: hours[i * 2] + hours[i * 2 + 1],
+      label: `${hourLabel(i * 2)} – ${hourLabel((i * 2 + 2) % 24)}`,
+      now: i === Math.floor(hour / 2),
+    }));
+    // Every six hours, under the bar each starts at
+    axis = `<div class="axis hours">${[0, 6, 12, 18].map((h) => `<span>${hourLabel(h)}</span>`).join("")}</div>`;
+  } else {
+    const size = GROUP[activityPeriod], dayName = (day, i) => i === length - 1 ? "Today" : fmtDay(day);
+    bars = Array.from({ length: length / size }, (_, b) => {
+      const from = b * size, to = from + size - 1;
+      return {
+        n: days.slice(from, to + 1).reduce((n, d) => n + d.n, 0),
+        label: size === 1
+          ? (to === length - 1 ? "Today" : new Date(dayList[to] + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }))
+          : `${dayName(dayList[from], from)} – ${dayName(dayList[to], to)}`,
+        now: to === length - 1,
+      };
+    });
+    axis = `<div class="axis"><span>${fmtDay(dayList[0])}</span><span>Today</span></div>`;
+  }
+  const most = Math.max(1, ...bars.map((b) => b.n));
+  for (const b of bars) b.pct = (b.n / most) * 100;
+  activityBars = bars;
+
+  const pill = activity.querySelector(".pill");
+  pill.querySelector("strong").textContent = compact.format(total);
+  pill.title = length === 1 ? "Pages visited today" : `Pages visited in the last ${length} days`;
+  for (const b of activity.querySelectorAll("[data-period]")) b.setAttribute("aria-pressed", b.dataset.period === activityPeriod);
+  activity.hidden = false;
+  activity.querySelector(".report").innerHTML = `
+    <div class="hero">
+      <span class="hero-ic">${icon("activity", 44)}</span>
+      <h1 title="${count.format(total)}">${compact.format(total)}</h1>
+      <div class="hero-meta">
+        <h4>Pages visited</h4>
+        <p>${length === 1 ? "Since midnight" : `${count.format(Math.round(total / length))} a day on average`}</p>
+      </div>
+    </div>
+    <div class="chart">${bars.map((b, i) =>
+      `<span class="col${b.now ? " now" : ""}" data-i="${i}"><i style="height:${b.pct}%"></i></span>`).join("")}
+      <div class="chart-tip" hidden></div>
+    </div>
+    ${axis}
+    <div class="stats">
+      <div class="card">${icon("world")}<div><p>Sites</p><h4>${count.format(Object.keys(sites).length)}</h4></div></div>
+      <div class="card">${icon("clock")}<div><p>Busiest hour</p><h4>${total ? hourLabel(peak) : "–"}</h4></div></div>
+    </div>
+    <h6 class="section">How you got there</h6>
+    <div class="split">${HOW.map(([id], k) => how[k] ? `<i class="k-${id}" style="flex-grow:${how[k]}"></i>` : "").join("")}</div>
+    <ul class="legend two">${HOW.map(([id, name], k) => `<li><span class="dot k-${id}"></span>${name}<strong>${count.format(how[k])}</strong></li>`).join("")}</ul>
+    <h6 class="section">Most visited</h6>
+    <ol class="top sites">${top.length ? top.map(([host, n]) => `<li>
+      ${favicon("https://" + host + "/")}
+      <a class="name" href="https://${esc(host)}/">${esc(host)}</a>
+      <span class="bar"><i style="width:${(n / top[0][1]) * 100}%"></i></span>
+      <span class="n">${count.format(n)}</span>
+    </li>`).join("") : `<li class="muted">No visits yet</li>`}</ol>
+    <div class="p-foot"><p>From your browser history</p><p>Updated ${fmtTime(new Date(activityData.until))}</p></div>`;
+}
+
+// The pages in the bar under the pointer. A bar's column is its whole height, with no gaps
+// between columns, so moving along the chart goes straight from one bar to the next.
+let activityBars = [];
+function showChartTip(col) {
+  const chart = col.parentElement, tip = chart.querySelector(".chart-tip"), bar = activityBars[col.dataset.i];
+  chart.querySelector(".col.on")?.classList.remove("on");
+  col.classList.add("on");
+  tip.innerHTML = `<strong>${count.format(bar.n)}</strong>${bar.n === 1 ? "page" : "pages"}<span>${esc(bar.label)}</span>`;
+  tip.hidden = false;
+  // Centred over the bar, but kept inside the chart
+  const half = tip.offsetWidth / 2, center = col.offsetLeft + col.offsetWidth / 2;
+  tip.style.left = `${Math.min(Math.max(center, half), chart.clientWidth - half)}px`;
+  tip.style.bottom = `calc(${bar.pct}% + 8px)`;
+}
+activity.addEventListener("pointerover", (e) => {
+  const col = e.target.closest(".chart .col");
+  if (col && !col.classList.contains("on")) showChartTip(col);
+});
+activity.addEventListener("pointerout", (e) => {
+  const chart = e.target.closest(".chart");
+  if (!chart || chart.contains(e.relatedTarget)) return;
+  chart.querySelector(".col.on")?.classList.remove("on");
+  chart.querySelector(".chart-tip").hidden = true;
+});
+
+// Opened as a plain file:// page there's no history, and the pill stays hidden
+if (globalThis.chrome?.history) {
+  loadActivity();
+  // Top up when the tab comes back, and start over when history is deleted
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadActivity(); });
+  chrome.history.onVisitRemoved.addListener(() => {
+    activityReset = Date.now();
+    // A load already running counted the deleted visits, so another one follows it
+    (activityLoading ?? Promise.resolve()).catch(() => {}).then(loadActivity);
+  });
+}
+
 /* ---------- settings (⌥ , or the gear) ---------- */
 const dialog = $("settings");
 $("settings-open").innerHTML = icon("settings");
@@ -811,7 +1016,7 @@ function saveSettings(kind) {
   store.set("settings", settings);
   if (kind === "weather") { buildWeather(); loadWeather(); }
   else if (kind === "clocks") renderClocks(new Date());
-  else if (kind === "hour12") { paintTime(new Date()); loadWeather(); }
+  else if (kind === "hour12") { paintTime(new Date()); loadWeather(); renderActivity(); }
   else if (kind === "fahrenheit") loadWeather();
 }
 

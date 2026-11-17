@@ -65,6 +65,10 @@
     --trackers: var(--helium-blue);
     --ads: #e8833a;
     --other: #9aa3c4;
+    /* Browsing activity: how pages were reached */
+    --typed: var(--helium-blue);
+    --links: #8a6fd8;
+    --bookmarks: #e8833a;
 
     /* GradientShimmer settings, from Prism's GradientShimmer.svelte */
     --shimmer-alpha: 0.35;
@@ -102,6 +106,9 @@
       --trackers: #7d92f5;
       --ads: #f0a066;
       --other: #5c6690;
+      --typed: #7d92f5;
+      --links: #b39cf5;
+      --bookmarks: #f0a066;
 
       --shimmer-alpha: 0.7;
       --shimmer-grain-alpha: 0.15;
@@ -209,7 +216,10 @@
   .bang-chip:empty { display: none; }
 
   /* Suggestions under the search box: bangs, or pages from history and bookmarks */
-  #search { position: relative; z-index: 1; }
+  /* Above the corner pills and their panels only while it has suggestions to show */
+  #search { position: relative; }
+  #search:has(.suggest:not(:empty)) { z-index: 3; }
+  .weather, .dock { z-index: 2; }
   .suggest {
     position: absolute; left: 0; right: 0; top: calc(100% + 6px);
     margin: 0; padding: 4px;
@@ -354,9 +364,44 @@
   .k-trackers { background: var(--trackers); }
   .k-ads { background: var(--ads); }
   .k-other { background: var(--other); }
+
+  /* Browsing activity: visits per day (or hour, for today) and the privacy report's parts */
+  .chart { position: relative; display: flex; height: 72px; }
+  /* Each column is the bar's whole hover area. No transitions: the panel blurs what's
+     behind it, and every frame of a fade would redraw that blur. */
+  .chart .col { flex: 1; display: flex; align-items: flex-end; height: 100%; padding: 0 2px; }
+  .chart .col i { width: 100%; min-height: 2px; border-radius: 3px; background: var(--helium-elevated-15); }
+  .chart .col.now i { background: var(--typed); }
+  .chart .col.on:not(.now) i { background: var(--secondary); }
+  .chart-tip {
+    position: absolute; z-index: 1; translate: -50% 0;
+    display: flex; align-items: baseline; gap: 4px;
+    padding: 5px 9px;
+    border-radius: 8px;
+    background: var(--tooltip-bg);
+    box-shadow: 2px 4px 14px 0 var(--tooltip-shadow);
+    font-size: 12px; color: var(--secondary); white-space: nowrap; font-variant-numeric: tabular-nums;
+    pointer-events: none;
+  }
+  .chart-tip[hidden] { display: none; }
+  .chart-tip strong { font-size: 13px; color: var(--primary); }
+  .chart-tip span { margin-left: 4px; color: var(--tertiary); }
+  .axis { display: flex; justify-content: space-between; margin: 6px 0 16px; font-size: 12px; color: var(--tertiary); font-variant-numeric: tabular-nums; }
+  /* Today: a label every three bars, at the left edge of the bar it starts */
+  .axis.hours { display: grid; grid-template-columns: repeat(4, 1fr); padding: 0 2px; }
+  .section + .split { margin-top: 8px; }
+  .legend.two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; }
+  .legend.two strong { margin-left: auto; }
+  .k-typed { background: var(--typed); }
+  .k-links { background: var(--links); }
+  .k-bookmarks { background: var(--bookmarks); }
+  .top.sites li { grid-template-columns: 16px minmax(0, 1fr) 96px 52px; }
+  .top .fav { display: inline-flex; width: 16px; height: 16px; color: var(--tertiary); }
+  .top a.name { color: inherit; text-decoration: none; }
+  .top a.name:hover { text-decoration: underline; text-underline-offset: 4px; }
   .split { display: flex; gap: 2px; height: 8px; margin: -4px 0 10px; border-radius: 4px; overflow: hidden; background: var(--helium-elevated-10); }
   .split i { min-width: 3px; }
-  .legend { display: flex; gap: 16px; margin: 0 0 18px; padding: 0; list-style: none; font-size: 13px; color: var(--secondary); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 18px; padding: 0; list-style: none; font-size: 13px; color: var(--secondary); }
   .legend li { display: flex; align-items: center; gap: 6px; }
   .legend strong { color: var(--primary); font-variant-numeric: tabular-nums; }
   .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
@@ -486,6 +531,7 @@
 <section class="clocks" id="clocks" aria-label="World clock"></section>
 <section class="weather" id="weather"></section>
 <div class="dock">
+  <div class="wx center" id="activity" hidden></div>
   <div class="wx center" id="ublock" hidden></div>
   <button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
 </div>
