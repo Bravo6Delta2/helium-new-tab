@@ -31,10 +31,8 @@
     --primary: #0d1c64;
     --secondary: #475a7f;
     --tertiary: #646f9a;
-    --white: #ffffff;
 
     --helium-blue: #3450d1;
-    --helium-blue-hover: #3a58db;
 
     --bg-surface: #fbfcff;
     --bg-gradient-start: #f4f7ff;
@@ -87,7 +85,6 @@
       --primary: #e3e6f2;
       --secondary: #8f9bcb;
       --tertiary: #7985b2;
-      --white: var(--primary);
 
       --tooltip-bg: #1d2a5d;
       --tooltip-shadow: color-mix(in srgb, var(--tooltip-bg) 40%, transparent);
@@ -269,7 +266,11 @@
   .wx.end { margin-left: auto; }
   .panel {
     position: absolute; left: 0; bottom: calc(100% + 12px);
-    width: 384px;
+    /* Within the window: 5vw each side, and above the pill (4vh + 38px + the 12px gap) */
+    width: min(384px, 90vw);
+    max-height: calc(96vh - 50px - 16px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
     padding: 20px 20px 16px;
     border-radius: var(--card-border-radius);
     background: var(--panel);
@@ -344,7 +345,13 @@
   .dock {
     position: fixed; left: 50%; bottom: 4vh; translate: -50% 0;
     display: flex; align-items: flex-end; gap: 8px;
+    /* Shown by app.js once the pills have their numbers */
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.2s, visibility 0s linear 0.2s;
   }
+  .dock.ready { opacity: 1; visibility: visible; transition-delay: 0s; }
+  /* Centred on the dock rather than the pill, so it stays inside a narrow window */
+  .wx.center { position: static; }
   .wx.center .panel { left: 50%; translate: -50% 0; transform-origin: bottom center; }
 
   /* Privacy report: blocked requests split into trackers, ads and other */
@@ -507,7 +514,7 @@
   .results li.note { color: var(--tertiary); cursor: default; }
 
   @media (prefers-reduced-motion: reduce) {
-    #shimmer, .panel { transition-duration: 1ms; }
+    #shimmer, .panel, .dock { transition-duration: 1ms; }
     .settings, .settings::backdrop { transition-duration: 1ms; }
   }
 </style>

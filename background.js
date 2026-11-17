@@ -15,11 +15,13 @@ const KIND = {
   FingerprintingInvasive: "trackers", FingerprintingGeneral: "trackers",
 };
 const RANK = { ads: 0, trackers: 1, other: 2 };
-// A day's sources hold counts per kind in this order, as a company like Google can be both
+// A day's sources hold counts per kind in this order, as a company like Google can be both.
+// app.js reads them in the same order (its KINDS), so keep the two alike.
 const KINDS = ["trackers", "ads", "other"];
 
 // Storage: "start" is the day counting began, and each day has its own "day:YYYY-MM-DD" key
 // holding { trackers, ads, other, sources }. Only today changes. The page shows up to 90 days.
+// "historyRemoved" is when history was last deleted, for the page's browsing activity.
 // "trackerList" is { at, names: [company], index: { domain: companyIndex * 3 + kind } }, with
 // kind in KINDS order. A plain object of numbers parses about twice as fast as domain/company
 // pairs, and each name is stored once.
@@ -32,24 +34,41 @@ const today = () => dayOf(Date.now());
 
 // Chrome stops the worker after 30 s idle and starts it for the next event, blocked or not.
 // Storage is only read once a request is actually blocked.
+// A failed load is tried again on the next block, rather than never.
 let ready = null;
-const init = () => ready ??= load();
+const init = () => ready ??= load().catch((err) => { ready = null; throw err; });
 
 async function load() {
-  const day = today();
-  let got = await chrome.storage.local.get(["start", "trackerList", "day:" + day]);
-  // No start means a fresh install, or data from an earlier version: start clean
+  const got = await chrome.storage.local.get(["start", "trackerList", "historyRemoved"]);
+  // No start means a fresh install, or data from an earlier version: start clean, but keep
+  // the page's note of deleted history, and the tracker list (an old one is replaced below)
   if (!got.start) {
-    await chrome.storage.local.clear();
-    got = { start: day };
-    await chrome.storage.local.set({ start: day });
+    const keep = ["historyRemoved", "trackerList"];
+    await chrome.storage.local.remove((await chrome.storage.local.getKeys()).filter((k) => !keep.includes(k)));
+    await chrome.storage.local.set({ start: today() });
   }
-  if (got["day:" + day]) days[day] = got["day:" + day];
-  // Lists saved by earlier versions have no index. Without a list, wait for one so the
-  // first blocks get their categories. A stale one keeps working while it refreshes.
+  // Lists saved by earlier versions have no index. Without a list, wait (a while) for one so
+  // the first blocks get their categories. A stale one keeps working while it refreshes.
   list = got.trackerList?.index ? got.trackerList : null;
   if (!list) await updateTrackerList();
   else if (Date.now() - list.at > LIST_TTL) updateTrackerList();
+}
+
+// A day not touched since the worker started is read from storage first, so its counts
+// add to what's saved rather than replace it. That's also the case when the clock goes
+// back to a day already counted.
+const loading = {};
+function dayEntry(day) {
+  if (days[day]) return days[day];
+  return loading[day] ??= chrome.storage.local.get("day:" + day).then((got) => {
+    delete loading[day];
+    const saved = got["day:" + day];
+    if (!saved) prune();
+    // No prototype, so a source like "constructor" is just a name
+    return days[day] ??= saved
+      ? { ...saved, sources: Object.assign(Object.create(null), saved.sources) }
+      : { trackers: 0, ads: 0, other: 0, sources: Object.create(null) };
+  });
 }
 
 // Drops days past KEEP_DAYS, when a day's first block is counted
@@ -61,7 +80,7 @@ async function prune() {
 
 async function updateTrackerList() {
   try {
-    const res = await fetch(TRACKER_LIST);
+    const res = await fetch(TRACKER_LIST, { signal: AbortSignal.timeout(20_000) });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const best = new Map(); // domain -> [kind, company]
     for (const [category, entries] of Object.entries((await res.json()).categories)) {
@@ -111,11 +130,7 @@ async function countBlocked(details) {
   await init();
   const [kind, name] = classify(new URL(details.url).hostname);
   const day = today();
-  let entry = days[day];
-  if (!entry) {
-    entry = days[day] = { trackers: 0, ads: 0, other: 0, sources: {} };
-    prune();
-  }
+  const entry = await dayEntry(day);
   entry[kind]++;
   (entry.sources[name] ??= [0, 0, 0])[KINDS.indexOf(kind)]++;
   dirty.add(day);
@@ -129,10 +144,13 @@ let saveTimer = null;
 function save() {
   saveTimer ??= setTimeout(() => {
     saveTimer = null;
-    const changes = {};
-    for (const day of dirty) changes["day:" + day] = days[day];
+    const changes = {}, saving = [...dirty];
+    for (const day of saving) changes["day:" + day] = days[day];
     dirty.clear();
-    chrome.storage.local.set(changes);
+    // Kept for the save after the next block if this one fails, rather than retried in a loop
+    chrome.storage.local.set(changes).catch(() => {
+      for (const day of saving) dirty.add(day);
+    });
   }, 5000);
 }
 
@@ -144,5 +162,15 @@ const filter = {
   urls: ["<all_urls>"],
   types: Object.values(chrome.webRequest.ResourceType).filter((t) => t !== "main_frame"),
 };
+// A redirect can't be filtered by where it goes, only by type: these are the ones uBO has
+// stand-ins for (noop.js, 1x1.gif, noop.html, noop.txt, noop.css, noop.mp3 and the like).
+const STAND_IN_TYPES = ["script", "image", "sub_frame", "xmlhttprequest", "stylesheet", "media", "object", "other"];
 chrome.webRequest.onErrorOccurred.addListener((d) => { if (d.error === BLOCKED) countBlocked(d); }, filter);
-chrome.webRequest.onBeforeRedirect.addListener((d) => { if (STAND_IN.test(d.redirectUrl)) countBlocked(d); }, filter);
+chrome.webRequest.onBeforeRedirect.addListener((d) => { if (STAND_IN.test(d.redirectUrl)) countBlocked(d); },
+  { ...filter, types: filter.types.filter((t) => STAND_IN_TYPES.includes(t)) });
+
+// Deleting history wakes the worker even with no new tab open. The page rebuilds its
+// browsing activity when history was deleted after it was built.
+chrome.history.onVisitRemoved.addListener(() => {
+  chrome.storage.local.set({ historyRemoved: Date.now() });
+});

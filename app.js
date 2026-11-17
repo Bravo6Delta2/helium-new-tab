@@ -41,20 +41,34 @@ const CONFIG = {
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+  set(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+    catch (err) { console.warn(`Couldn't save "${k}":`, err); return false; }
+  },
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
+// A zone the browser doesn't know makes every date function given it throw
+const validTz = (tz) => {
+  if (typeof tz !== "string" || !tz) return false;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; }
+};
+
 // Two slots each, left and right. Once saved, these win over CONFIG.
 const SLOTS = ["Left", "Right"];
-const settings = {
-  weather: CONFIG.cities, clocks: CONFIG.clocks,
-  hour12: CONFIG.hour12, fahrenheit: CONFIG.fahrenheit, engine: CONFIG.search.engine,
-  ...store.get("settings"),
-};
-for (const k of ["weather", "clocks"]) settings[k] = SLOTS.map((_, i) => settings[k]?.[i] || null);
-// An engine since removed from CONFIG falls back to the first one
-if (!CONFIG.search.engines[settings.engine]) settings.engine = Object.keys(CONFIG.search.engines)[0];
+function readSettings() {
+  const s = {
+    weather: CONFIG.cities, clocks: CONFIG.clocks,
+    hour12: CONFIG.hour12, fahrenheit: CONFIG.fahrenheit, engine: CONFIG.search.engine,
+    ...store.get("settings"),
+  };
+  for (const k of ["weather", "clocks"]) s[k] = SLOTS.map((_, i) => s[k]?.[i] || null);
+  s.clocks = s.clocks.map((c) => c && validTz(c.tz) ? c : null);
+  // An engine since removed from CONFIG falls back to the first one
+  if (!Object.hasOwn(CONFIG.search.engines, s.engine)) s.engine = Object.keys(CONFIG.search.engines)[0];
+  return s;
+}
+const settings = readSettings();
 
 // "15:05", or "3:05 PM"
 const fmtTime = (d, timeZone) => d.toLocaleTimeString(settings.hour12 ? "en-US" : "en-GB",
@@ -100,24 +114,38 @@ const shimmer = window.startShimmer ? startShimmer($("shimmer")) : { emphasize()
 /* ---------- clock ---------- */
 function tick() {
   const now = new Date();
-  paintTime(now);
+  // Set first, so a throw while painting can't stop the clock
   setTimeout(tick, 1000 - now.getMilliseconds());
+  paintTime(now);
 }
+// Only touch the DOM when the text changes, so it stays selectable
+const setText = (el, text) => { if (el.textContent !== text) el.textContent = text; };
 function paintTime(now) {
   // AM and PM are set smaller, so the big clock keeps its size
-  $("time").innerHTML = esc(fmtTime(now)).replace(/\s?([AP]M)$/, '<span class="ampm">$1</span>');
-  $("date").textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const time = esc(fmtTime(now)).replace(/\s?([AP]M)$/, '<span class="ampm">$1</span>');
+  if ($("time").innerHTML !== time) $("time").innerHTML = time;
+  setText($("date"), now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }));
   // A weather panel's clock shows the time in that city
-  for (const el of document.querySelectorAll("[data-clock]")) el.textContent = fmtTime(now, el.dataset.clock || undefined);
+  for (const el of document.querySelectorAll("[data-clock]")) setText(el, fmtTime(now, el.dataset.clock || undefined));
   renderClocks(now);
 }
 
 /* ---------- world clocks ---------- */
-// Minutes the zone is ahead of local time
-function tzOffset(tz, d) {
-  const wall = (timeZone) => new Date(d.toLocaleString("en-US", { timeZone }));
-  return Math.round((wall(tz) - wall()) / 60_000);
+// Minutes the zone is ahead of UTC at d, from its wall clock read back as UTC
+const wallClocks = new Map(); // zone -> its formatter, as the clocks ask every second
+function utcOffset(tz, d) {
+  let fmt = wallClocks.get(tz);
+  if (!fmt) wallClocks.set(tz, fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hourCycle: "h23",
+    year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric",
+  }));
+  const parts = {};
+  for (const { type, value } of fmt.formatToParts(d)) parts[type] = Number(value);
+  const wall = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.round((wall - Math.floor(d / 1000) * 1000) / 60_000);
 }
+// Minutes the zone is ahead of local time
+const tzOffset = (tz, d) => utcOffset(tz, d) + d.getTimezoneOffset();
 function offsetLabel(min) {
   if (!min) return "Same time";
   const a = Math.abs(min);
@@ -141,8 +169,9 @@ tick();
 const q = $("q");
 $("search-icon").innerHTML = icon("search");
 
+// A function as the replacement, so "$&" and the like in the terms stay as typed
 function fill(template, terms) {
-  return template.replace("%s", encodeURIComponent(terms));
+  return template.replace("%s", () => encodeURIComponent(terms));
 }
 
 function findBang(text) {
@@ -151,10 +180,14 @@ function findBang(text) {
   return m ? { key: m[1].toLowerCase(), terms: (text.slice(0, m.index) + text.slice(m.index + m[0].length)).trim() } : null;
 }
 
+// "package.json" or "app.js" alone is more likely a file name to look up than a site.
+// Extensions that are also top-level domains (.md, .rs, .sh, .py, .zip) are left as sites.
+const FILE_EXT = /^[\w-]+\.(json|js|mjs|cjs|ts|tsx|jsx|rb|go|java|kt|swift|c|h|cpp|hpp|cs|php|txt|csv|yml|yaml|toml|ini|lock|log|css|scss|html|xml|svg|png|jpe?g|gif|webp|pdf|exe|dmg)$/i;
+
 function looksLikeUrl(text) {
   return /^[a-z][\w+.-]*:\/\//i.test(text)
-    || /^localhost(:\d+)?(\/\S*)?$/i.test(text)
-    || /^[\w-]+(\.[\w-]+)*\.[a-z]{2,}(:\d+)?(\/\S*)?$/i.test(text);
+    || /^(localhost|\d{1,3}(\.\d{1,3}){3})(:\d+)?([/?#]\S*)?$/i.test(text)
+    || (/^[\w-]+(\.[\w-]+)*\.[a-z]{2,}(:\d+)?([/?#]\S*)?$/i.test(text) && !FILE_EXT.test(text));
 }
 
 // Helium's list is Kagi's bangs plus Helium's extras. "f" holds Kagi's format flags.
@@ -164,12 +197,15 @@ function looksLikeUrl(text) {
 const FLAG = { OPEN_BASE_PATH: 1, OPEN_SNAP_DOMAIN: 2, ENCODE: 4, SPACE_TO_PLUS: 8 };
 let heliumBangs = null; // Map of trigger -> { s: name, ts: [trigger], u: url template, f: flags }
 let heliumBangList = []; // The same bangs in a list, for suggestions
-let bangsLoading = null;
+let bangsLoading = null, bangsFailedAt = 0;
+const BANGS_RETRY = 30_000;
 
 // Older versions kept a second copy in localStorage
 try { localStorage.removeItem("bangs"); } catch {}
 
 function loadHeliumBangs() {
+  // Offline, every keystroke would ask again. Wait a little between tries.
+  if (!bangsLoading && Date.now() - bangsFailedAt < BANGS_RETRY) return Promise.resolve();
   bangsLoading ??= (async () => {
     try {
       const res = await fetch(CONFIG.search.bangList);
@@ -183,15 +219,19 @@ function loadHeliumBangs() {
       updateBangHint();
       if (document.activeElement === q) updateSuggestions();
     } catch {
-      // Unknown bangs still work through DuckDuckGo. Try again on the next bang.
+      // Unknown bangs still work through DuckDuckGo. Try again on a later bang.
       bangsLoading = null;
+      bangsFailedAt = Date.now();
     }
   })();
   return bangsLoading;
 }
 
+// Own properties only, so "!constructor" isn't Object's
+const ownBang = (key) => Object.hasOwn(CONFIG.bangs, key) ? CONFIG.bangs[key] : null;
+
 function lookupBang(key) {
-  const own = CONFIG.bangs[key];
+  const own = ownBang(key);
   if (own) return { s: own[0], u: own[1].replace("%s", "{searchTerms}") };
   return heliumBangs?.get(key) || null;
 }
@@ -199,9 +239,10 @@ function lookupBang(key) {
 function runBang(bang, terms) {
   const f = bang.f ?? 15; // no flags given means all of them are on
   if (!terms) {
+    // With no terms, Kagi opens the site's root (snap domain) or the search page's path (base path)
     try {
       const url = new URL(bang.u.replace("{searchTerms}", ""));
-      return f & (FLAG.OPEN_BASE_PATH | FLAG.OPEN_SNAP_DOMAIN) ? url.origin : url.href;
+      return f & FLAG.OPEN_SNAP_DOMAIN ? url.origin : f & FLAG.OPEN_BASE_PATH ? url.origin + url.pathname : url.href;
     } catch {
       return null;
     }
@@ -209,7 +250,7 @@ function runBang(bang, terms) {
   let q = terms;
   if (f & FLAG.ENCODE) q = encodeURIComponent(q);
   if (f & FLAG.SPACE_TO_PLUS) q = q.replace(/%20| /g, "+");
-  return bang.u.replace("{searchTerms}", q);
+  return bang.u.replace("{searchTerms}", () => q);
 }
 
 function resolve(raw) {
@@ -224,7 +265,8 @@ function resolve(raw) {
   }
   if (looksLikeUrl(text)) {
     if (/^[a-z][\w+.-]*:\/\//i.test(text)) return text;
-    return (/^localhost\b/i.test(text) ? "http://" : "https://") + text;
+    // Local servers and routers rarely have certificates
+    return (/^(localhost|\d{1,3}(\.\d{1,3}){3})\b/i.test(text) ? "http://" : "https://") + text;
   }
   return fill(CONFIG.search.engines[settings.engine], text);
 }
@@ -237,7 +279,12 @@ function updateBangHint() {
   $("bang-chip").textContent = label;
   $("search-icon").innerHTML = icon(bang?.key ? "bang" : "search");
 }
-q.addEventListener("input", () => { updateBangHint(); updateSuggestions(); });
+q.addEventListener("input", () => {
+  // The rows on screen are for the old text until the new ones arrive, so Enter searches
+  if (active !== -1) { active = -1; paintSuggestions(); }
+  updateBangHint();
+  updateSuggestions();
+});
 
 function go(url, newTab) {
   shimmer.emphasize();
@@ -250,6 +297,8 @@ function go(url, newTab) {
 }
 
 q.addEventListener("keydown", async (e) => {
+  // Enter and the arrows belong to the IME while it's composing
+  if (e.isComposing || e.keyCode === 229) return;
   if ((e.key === "ArrowDown" || e.key === "ArrowUp") && rows.length) {
     e.preventDefault();
     // -1 is the text as typed, between the last row and the first
@@ -266,9 +315,14 @@ q.addEventListener("keydown", async (e) => {
   } else if (e.key === "Enter") {
     e.preventDefault();
     if (rows[active]) return pick(rows[active], e.metaKey || e.ctrlKey);
+    const text = q.value;
     // The list may still be loading. Give it a moment.
-    if (!heliumBangs && findBang(q.value)) await Promise.race([loadHeliumBangs(), new Promise((r) => setTimeout(r, 1500))]);
-    const url = resolve(q.value);
+    if (!heliumBangs && findBang(text)) {
+      await Promise.race([loadHeliumBangs(), new Promise((r) => setTimeout(r, 1500))]);
+      // Cleared or edited while waiting: that's a new search, with its own Enter
+      if (q.value !== text) return;
+    }
+    const url = resolve(text);
     if (url) go(url, e.metaKey || e.ctrlKey);
   }
 });
@@ -298,7 +352,7 @@ function matchBangs(prefix) {
     let t = null;
     for (const x of b.ts) if (x.startsWith(prefix) && (!t || x.length < t.length)) t = x;
     // Your own bangs win over Helium's for the same trigger
-    if (t && !CONFIG.bangs[t]) found.push({ t, s: b.s, u: b.u, n: b.ts.length });
+    if (t && !ownBang(t)) found.push({ t, s: b.s, u: b.u, n: b.ts.length });
   }
   return [...own, ...found]
     .sort((a, b) => (b.t === prefix) - (a.t === prefix) || a.t.length - b.t.length || b.n - a.n)
@@ -308,7 +362,10 @@ function matchBangs(prefix) {
 
 // Result pages of the engines in Settings, which would crowd out the pages themselves
 const isSearchPage = (url) => Object.values(CONFIG.search.engines).some((e) => url.startsWith(e.slice(0, e.indexOf("%s"))));
-const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return ""; } };
+// The host without www, and with the port if asked
+const hostOf = (url, port = false) => {
+  try { const u = new URL(url); return (port ? u.host : u.hostname).replace(/^www\./, ""); } catch { return ""; }
+};
 const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 async function matchPages(text) {
@@ -423,9 +480,10 @@ suggest.addEventListener("auxclick", (e) => {
 $("search").addEventListener("submit", (e) => e.preventDefault());
 
 // The box isn't focused on open, but typing anywhere on the page goes into it
+// Space is left alone: on a focused button it presses it, and a search doesn't start with one.
 document.addEventListener("keydown", (e) => {
-  if (e.target === q || e.metaKey || e.ctrlKey || e.altKey || $("settings").open) return;
-  if (e.key.length === 1 || e.key === "Backspace") q.focus({ preventScroll: true });
+  if (e.target === q || e.metaKey || e.ctrlKey || e.altKey || e.isComposing || $("settings").open) return;
+  if ((e.key.length === 1 && e.key !== " ") || e.key === "Backspace") q.focus({ preventScroll: true });
 });
 
 /* ---------- weather (Open-Meteo) ---------- */
@@ -505,12 +563,19 @@ function topPollen(current) {
   return top;
 }
 
-async function getCached(url) {
+// Each city or unit change gives new URLs. Entries for ones no longer shown are dropped.
+function pruneWeatherCache(keep) {
+  try {
+    for (const k of Object.keys(localStorage)) if (k.startsWith("wx:") && !keep.includes(k.slice(3))) localStorage.removeItem(k);
+  } catch {}
+}
+
+async function getCached(url, timeout) {
   // One request covers every city. Open-Meteo returns an array when given several coordinates.
   const cached = store.get("wx:" + url);
   if (cached && Date.now() - cached.at < WEATHER_TTL) return cached.data;
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeout) });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = [].concat(await res.json());
     store.set("wx:" + url, { at: Date.now(), data });
@@ -521,8 +586,11 @@ async function getCached(url) {
   }
 }
 
-const deg = (t) => `${Math.round(t)}°`;
-const compass = (d) => ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(d / 45) % 8];
+// Open-Meteo sends null for a value a model doesn't have, shown as a dash
+const has = (v) => typeof v === "number" && Number.isFinite(v);
+const deg = (t) => has(t) ? `${Math.round(t)}°` : "–";
+const fixed = (v, unit) => has(v) ? `${v.toFixed(1)} ${unit}` : "–";
+const compass = (d) => has(d) ? ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(d / 45) % 8] : "";
 // Open-Meteo gives times as the city's wall clock, "2026-11-17T06:52"
 const clockOf = (iso) => {
   const h = Number(iso.slice(11, 13)), m = iso.slice(14, 16);
@@ -532,22 +600,25 @@ const clockOf = (iso) => {
 function renderCity(el, city, w, air) {
   const c = w.current, d = w.daily;
   const now = describe(c.weather_code, c.is_day);
-  const weekLo = Math.min(...d.temperature_2m_min), weekHi = Math.max(...d.temperature_2m_max);
+  const weekLo = Math.min(...d.temperature_2m_min.filter(has)), weekHi = Math.max(...d.temperature_2m_max.filter(has));
   const pos = (t) => ((t - weekLo) / (weekHi - weekLo || 1)) * 100;
   const sunsetPassed = c.time > d.sunset[0];
+  // paintTime redraws this clock every second, so a zone it can't use would stop the clock
+  const tz = validTz(w.timezone) ? w.timezone : "";
 
   const days = d.time.map((day, i) => {
     const lo = d.temperature_2m_min[i], hi = d.temperature_2m_max[i], mm = d.precipitation_sum[i];
     const date = new Date(day + "T12:00");
     const label = i === 0 ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
     const cond = describe(d.weather_code[i]);
-    const dot = i === 0 ? `<em style="left:${pos(c.temperature_2m)}%"></em>` : "";
+    const dot = i === 0 && has(c.temperature_2m) ? `<em style="left:${pos(c.temperature_2m)}%"></em>` : "";
+    const range = has(lo) && has(hi) ? `<i style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></i>` : "";
     return `<li>
       <span class="day">${label}</span>
       <span class="ic">${icon(cond.icon, 20)}</span>
       <span class="mm">${mm >= 0.1 ? `${mm < 10 ? mm.toFixed(1) : Math.round(mm)} mm` : ""}</span>
       <span class="lo">${deg(lo)}</span>
-      <span class="bar"><i style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></i>${dot}</span>
+      <span class="bar">${range}${dot}</span>
       <span class="hi">${deg(hi)}</span>
     </li>`;
   }).join("");
@@ -558,7 +629,7 @@ function renderCity(el, city, w, air) {
 
   el.innerHTML = `
     <div class="panel">
-      <div class="p-head"><h5>${esc(city.name)}</h5><h5 class="muted" data-clock="${esc(w.timezone)}">${fmtTime(new Date(), w.timezone)}</h5></div>
+      <div class="p-head"><h5>${esc(city.name)}</h5><h5 class="muted" data-clock="${esc(tz)}">${fmtTime(new Date(), tz || undefined)}</h5></div>
       <div class="hero">
         <span class="hero-ic">${icon(now.icon, 44)}</span>
         <h1>${deg(c.temperature_2m)}</h1>
@@ -569,9 +640,9 @@ function renderCity(el, city, w, air) {
         </div>
       </div>
       <div class="stats">
-        <div class="card">${icon("wind")}<div><p>Wind</p><h4>${c.wind_speed_10m.toFixed(1)} m/s ${compass(c.wind_direction_10m)}</h4></div></div>
-        <div class="card">${icon("umbrella")}<div><p>Rain today</p><h4>${d.precipitation_sum[0].toFixed(1)} mm · ${d.precipitation_probability_max[0] ?? 0}%</h4></div></div>
-        <div class="card">${icon("droplet")}<div><p>Humidity</p><h4>${c.relative_humidity_2m}%</h4></div></div>
+        <div class="card">${icon("wind")}<div><p>Wind</p><h4>${fixed(c.wind_speed_10m, "m/s")} ${compass(c.wind_direction_10m)}</h4></div></div>
+        <div class="card">${icon("umbrella")}<div><p>Rain today</p><h4>${fixed(d.precipitation_sum[0], "mm")} · ${d.precipitation_probability_max[0] ?? 0}%</h4></div></div>
+        <div class="card">${icon("droplet")}<div><p>Humidity</p><h4>${has(c.relative_humidity_2m) ? `${c.relative_humidity_2m}%` : "–"}</h4></div></div>
         ${airCards(air)}
         <div class="card">${sun}</div>
       </div>
@@ -628,18 +699,22 @@ function buildWeather() {
 document.addEventListener("click", (e) => { if (!e.target.closest(".wx")) closePanels(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanels(); });
 
+// Each load is numbered, and only the newest one renders. An older one may finish last,
+// for one with the cities or the unit since changed in Settings.
+let weatherSeq = 0, weatherUrls = null;
 async function loadWeather() {
-  const list = cards;
-  if (!list.length) return;
+  const list = cards, seq = ++weatherSeq;
   const cities = list.map((c) => c.city);
+  const urls = list.length ? [weatherUrl(cities), airUrl(cities)] : [];
+  if (String(urls) !== String(weatherUrls)) pruneWeatherCache(weatherUrls = urls);
+  if (!list.length) return;
   try {
-    // Air quality is a nice-to-have, so the forecast shows without it
-    const [data, air] = await Promise.all([getCached(weatherUrl(cities)), getCached(airUrl(cities)).catch(() => [])]);
-    // The cities may have changed in Settings while this was loading
-    if (list !== cards) return;
+    // Air quality is a nice-to-have, so the forecast shows without it, and doesn't wait long for it
+    const [data, air] = await Promise.all([getCached(urls[0], 15_000), getCached(urls[1], 5_000).catch(() => [])]);
+    if (seq !== weatherSeq) return;
     list.forEach(({ city, el }, i) => renderCity(el, city, data[i], air[i]));
   } catch (err) {
-    if (list !== cards) return;
+    if (seq !== weatherSeq) return;
     list.forEach(({ city, el }) => {
       el.querySelector(".pill").textContent = `${city.name}: weather unavailable`;
     });
@@ -650,9 +725,24 @@ loadWeather();
 setInterval(loadWeather, WEATHER_TTL);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadWeather(); });
 
+/* ---------- the dock ---------- */
+// The activity and uBlock pills sit beside the gear, centred together. The dock stays
+// hidden until both have their numbers, then shows all at once, so nothing in it moves
+// after it appears. A slow history rebuild (first run, daily, after deleting history)
+// isn't waited for long.
+const DOCK_WAIT = 2000;
+const dockPending = new Set();
+const showDock = () => document.querySelector(".dock").classList.add("ready");
+function settleDock(part) {
+  dockPending.delete(part);
+  if (!dockPending.size) showDock();
+}
+setTimeout(showDock, DOCK_WAIT);
+
 /* ---------- uBlock Origin stats ---------- */
 // background.js counts what uBlock Origin blocks. Opened as a plain file:// page there's
 // no extension storage, and the pill stays hidden.
+// The order background.js stores each source's counts in (its KINDS), so keep the two alike
 const KINDS = [["trackers", "Trackers"], ["ads", "Ads"], ["other", "Other"]];
 // [id, label, days]. background.js keeps 90 days.
 const PERIODS = [["today", "Today", 1], ["7d", "7D", 7], ["30d", "30D", 30], ["90d", "90D", 90]];
@@ -697,12 +787,14 @@ function fmtDuration(ms) {
 
 function renderUblock({ start, days }) {
   const [, , length] = PERIODS.find(([id]) => id === period);
-  const from = daysAgo(length - 1);
+  const from = daysAgo(length - 1), to = daysAgo(0);
 
-  // Sum the period, and each company's or domain's share of it
-  const sum = { trackers: 0, ads: 0, other: 0 }, sources = {};
+  // Sum the period, and each company's or domain's share of it. No prototype, so a
+  // domain like "constructor" is just a name.
+  const sum = { trackers: 0, ads: 0, other: 0 }, sources = Object.create(null);
   for (const [day, d] of Object.entries(days)) {
-    if (day < from) continue;
+    // Days after today were counted while the clock was set ahead
+    if (day < from || day > to) continue;
     for (const k in sum) sum[k] += d[k];
     // Per kind, in KINDS order
     for (const [name, counts] of Object.entries(d.sources)) {
@@ -757,14 +849,16 @@ function renderUblock({ start, days }) {
 const ublockData = { start: null, days: {} };
 const showUblock = () => { if (ublockData.start && !document.hidden) renderUblock(ublockData); };
 if (globalThis.chrome?.storage) {
+  dockPending.add("ublock");
   const dayKeys = Array.from({ length: PERIODS.at(-1)[2] }, (_, i) => "day:" + daysAgo(i));
   chrome.storage.local.get(["start", ...dayKeys]).then((got) => {
     ublockData.start = got.start;
     for (const k of dayKeys) if (got[k]) ublockData.days[k.slice(4)] = got[k];
     showUblock();
-  });
+  }).catch(() => {}).finally(() => settleDock("ublock"));
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
+    if (changes.historyRemoved?.newValue) historyRemoved();
     let changed = false;
     for (const [k, { newValue }] of Object.entries(changes)) {
       if (k === "start") ublockData.start = newValue;
@@ -816,50 +910,81 @@ activity.querySelector(".seg").addEventListener("click", (e) => {
 });
 
 // Visits summed per local day, kept in localStorage and topped up with what's new since
-// "until": { v, built, until, days: { "YYYY-MM-DD": { n, hours: [24], how: [HOW], sites: { host: n } } } }
-let activityData = null, activityLoading = null, activityReset = 0;
+// "until": { v, built, until, plain: { site: bool }, days: { "YYYY-MM-DD": { n, hours: [24], how: [HOW], sites: { site: n } } } }
+// A site is the host and port, without www. "plain" is true for sites only visited over
+// http, so their links don't send them to https.
+let activityData = null, activityLoading = null, activityStale = false;
+// A tab coming back tops up at most this often, unless history was deleted meanwhile
+const ACTIVITY_TOPUP = 60_000;
+
+// No prototype, so a host like "constructor" or "__proto__" is just a key
+const dict = (o) => Object.assign(Object.create(null), o);
+
+// background.js stamps "historyRemoved" when history is deleted, even with no new tab open.
+// A cache built before that is thrown away.
+async function buildActivity() {
+  const now = Date.now();
+  const { historyRemoved = 0 } = await chrome.storage.local.get("historyRemoved");
+  // Another tab may have just built it, while this one waited for the lock
+  let data = store.get("activity");
+  if (data?.v !== 2 || now - data.built > ACTIVITY_REBUILD || data.built < historyRemoved) {
+    // A millisecond before midnight, as visits at "until" itself were counted last time
+    data = { v: 2, built: now, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime() - 1, plain: {}, days: {} };
+  }
+  data.plain = dict(data.plain);
+  for (const d of Object.values(data.days)) d.sites = dict(d.sites);
+  // Every page visited since, then each one's visits. Reloads aren't new visits.
+  const pages = await chrome.history.search({ text: "", startTime: data.until, endTime: now, maxResults: 1_000_000 });
+  for (let i = 0; i < pages.length; i += 200) {
+    const batch = pages.slice(i, i + 200).filter((p) => /^https?:/i.test(p.url));
+    const visits = await Promise.all(batch.map((p) => chrome.history.getVisits({ url: p.url })));
+    batch.forEach((p, j) => {
+      const site = hostOf(p.url, true);
+      // https anywhere wins
+      data.plain[site] = /^http:/i.test(p.url) && data.plain[site] !== false;
+      for (const v of visits[j]) {
+        if (v.visitTime <= data.until || v.visitTime > now || v.transition === "reload") continue;
+        const at = new Date(v.visitTime);
+        const d = data.days[dayOf(at)] ??= { n: 0, hours: Array(24).fill(0), how: HOW.map(() => 0), sites: dict() };
+        d.n++;
+        d.hours[at.getHours()]++;
+        d.how[howOf(v.transition)]++;
+        d.sites[site] = (d.sites[site] ?? 0) + 1;
+      }
+    });
+  }
+  data.until = now;
+  const oldest = daysAgo(ACTIVITY_DAYS - 1);
+  for (const day in data.days) if (day < oldest) delete data.days[day];
+  const seen = new Set(Object.values(data.days).flatMap((d) => Object.keys(d.sites)));
+  for (const site in data.plain) if (!seen.has(site)) delete data.plain[site];
+  store.set("activity", data);
+  return data;
+}
 
 function loadActivity() {
-  activityLoading ??= (async () => {
-    try {
-      const now = Date.now();
-      let data = store.get("activity");
-      if (data?.v !== 1 || now - data.built > ACTIVITY_REBUILD || data.built < activityReset) {
-        data = { v: 1, built: now, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime(), days: {} };
-      }
-      // Every page visited since, then each one's visits. Reloads aren't new visits.
-      const pages = await chrome.history.search({ text: "", startTime: data.until, endTime: now, maxResults: 1_000_000 });
-      for (let i = 0; i < pages.length; i += 200) {
-        const batch = pages.slice(i, i + 200).filter((p) => /^https?:/i.test(p.url));
-        const visits = await Promise.all(batch.map((p) => chrome.history.getVisits({ url: p.url })));
-        batch.forEach((p, j) => {
-          const host = hostOf(p.url);
-          for (const v of visits[j]) {
-            if (v.visitTime <= data.until || v.visitTime > now || v.transition === "reload") continue;
-            const at = new Date(v.visitTime);
-            const d = data.days[dayOf(at)] ??= { n: 0, hours: Array(24).fill(0), how: HOW.map(() => 0), sites: {} };
-            d.n++;
-            d.hours[at.getHours()]++;
-            d.how[howOf(v.transition)]++;
-            d.sites[host] = (d.sites[host] ?? 0) + 1;
-          }
-        });
-      }
-      data.until = now;
-      const oldest = daysAgo(ACTIVITY_DAYS - 1);
-      for (const day in data.days) if (day < oldest) delete data.days[day];
-      store.set("activity", data);
-      activityData = data;
-      renderActivity();
-    } catch {
-      // History is unavailable. The pill stays as it was, and the next tab tries again.
-    } finally {
-      activityLoading = null;
-    }
-  })();
+  if (activityLoading) return activityLoading;
+  activityStale = false;
+  // One tab at a time, so tabs opened together don't each rebuild 90 days of history
+  const locked = (fn) => navigator.locks ? navigator.locks.request("activity", fn) : fn();
+  activityLoading = locked(buildActivity)
+    .then((data) => { activityData = data; renderActivity(); })
+    // History is unavailable. The pill stays hidden, and the next tab tries again.
+    .catch(() => {})
+    .finally(() => { activityLoading = null; settleDock("activity"); });
   return activityLoading;
 }
 
+// From storage.onChanged in the uBlock section. A tab in the background rebuilds when it's next shown.
+function historyRemoved() {
+  activityStale = true;
+  if (document.hidden || !globalThis.chrome?.history) return;
+  reloadActivity();
+}
+// A load already running may have counted deleted visits, so another one follows it
+const reloadActivity = () => (activityLoading ?? Promise.resolve()).then(loadActivity);
+
+const siteUrl = (site) => `${activityData.plain[site] ? "http" : "https"}://${site}/`;
 const hourLabel = (h) => settings.hour12 ? `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}` : `${String(h).padStart(2, "0")}:00`;
 
 function renderActivity() {
@@ -870,7 +995,7 @@ function renderActivity() {
   const days = dayList.map((day) => activityData.days[day] ?? empty);
 
   const total = days.reduce((n, d) => n + d.n, 0);
-  const hours = Array(24).fill(0), how = HOW.map(() => 0), sites = {};
+  const hours = Array(24).fill(0), how = HOW.map(() => 0), sites = dict();
   for (const d of days) {
     d.hours.forEach((n, h) => { hours[h] += n; });
     d.how.forEach((n, k) => { how[k] += n; });
@@ -935,9 +1060,9 @@ function renderActivity() {
     <div class="split">${HOW.map(([id], k) => how[k] ? `<i class="k-${id}" style="flex-grow:${how[k]}"></i>` : "").join("")}</div>
     <ul class="legend two">${HOW.map(([id, name], k) => `<li><span class="dot k-${id}"></span>${name}<strong>${count.format(how[k])}</strong></li>`).join("")}</ul>
     <h6 class="section">Most visited</h6>
-    <ol class="top sites">${top.length ? top.map(([host, n]) => `<li>
-      ${favicon("https://" + host + "/")}
-      <a class="name" href="https://${esc(host)}/">${esc(host)}</a>
+    <ol class="top sites">${top.length ? top.map(([site, n]) => `<li>
+      ${favicon(siteUrl(site))}
+      <a class="name" href="${esc(siteUrl(site))}">${esc(site)}</a>
       <span class="bar"><i style="width:${(n / top[0][1]) * 100}%"></i></span>
       <span class="n">${count.format(n)}</span>
     </li>`).join("") : `<li class="muted">No visits yet</li>`}</ol>
@@ -971,15 +1096,19 @@ activity.addEventListener("pointerout", (e) => {
 
 // Opened as a plain file:// page there's no history, and the pill stays hidden
 if (globalThis.chrome?.history) {
+  dockPending.add("activity");
   loadActivity();
-  // Top up when the tab comes back, and start over when history is deleted
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadActivity(); });
-  chrome.history.onVisitRemoved.addListener(() => {
-    activityReset = Date.now();
-    // A load already running counted the deleted visits, so another one follows it
-    (activityLoading ?? Promise.resolve()).catch(() => {}).then(loadActivity);
+  // Top up when the tab comes back. Deleted history comes through historyRemoved().
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    // A tab opened in the background skipped rendering until now
+    renderActivity();
+    if (activityStale) reloadActivity();
+    else if (!activityData || Date.now() - activityData.until >= ACTIVITY_TOPUP) loadActivity();
   });
 }
+
+if (!dockPending.size) showDock();
 
 /* ---------- settings (⌥ , or the gear) ---------- */
 const dialog = $("settings");
@@ -1012,8 +1141,22 @@ document.addEventListener("keydown", (e) => {
   else openSettings();
 });
 
+// Another tab saved its settings. Taking them on keeps this tab from later saving its
+// older copy over them.
+window.addEventListener("storage", (e) => {
+  if (e.key !== "settings") return;
+  const next = readSettings();
+  const changed = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(settings[k]));
+  Object.assign(settings, next);
+  for (const kind of changed) applySettings(kind);
+  if (changed.length && dialog.open) { renderGeneral(); renderSlots(); }
+});
+
 function saveSettings(kind) {
   store.set("settings", settings);
+  applySettings(kind);
+}
+function applySettings(kind) {
   if (kind === "weather") { buildWeather(); loadWeather(); }
   else if (kind === "clocks") renderClocks(new Date());
   else if (kind === "hour12") { paintTime(new Date()); loadWeather(); renderActivity(); }
@@ -1045,7 +1188,7 @@ function renderGeneral() {
 async function searchCities(name, signal) {
   const res = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&name=" + encodeURIComponent(name), { signal });
   if (!res.ok) throw new Error("HTTP " + res.status);
-  return ((await res.json()).results || []).filter((r) => r.timezone).map((r) => ({
+  return ((await res.json()).results || []).filter((r) => r.timezone && validTz(r.timezone)).map((r) => ({
     name: r.name, region: r.admin1 ?? "", country: r.country ?? "",
     lat: r.latitude, lon: r.longitude, tz: r.timezone,
   }));
@@ -1073,16 +1216,19 @@ function slotField(kind, i, label) {
     <ul class="results" id="${id}" role="listbox"></ul>`;
   const input = el.querySelector("input"), list = el.querySelector(".results");
   const country = el.querySelector(".country"), remove = el.querySelector(".icon-btn");
-  let found = [], active = 0, timer, ctrl;
+  // "foundFor" is the text the results are for. Enter only picks one while it's still in the box.
+  let found = [], foundFor = "", active = 0, timer, ctrl;
 
   const paint = (note) => {
     list.innerHTML = note ? `<li class="note">${note}</li>` : found.map((c, j) =>
-      `<li role="option" data-j="${j}" class="${j === active ? "active" : ""}" aria-selected="${j === active}">
+      `<li role="option" id="${id}-${j}" data-j="${j}" class="${j === active ? "active" : ""}" aria-selected="${j === active}">
         ${esc(c.name)}<small>${esc([c.region, c.country].filter(Boolean).join(", "))}</small>
       </li>`).join("");
     input.setAttribute("aria-expanded", list.children.length > 0);
+    if (found[active]) input.setAttribute("aria-activedescendant", `${id}-${active}`);
+    else input.removeAttribute("aria-activedescendant");
   };
-  const show = (items, note) => { found = items; active = 0; paint(note); };
+  const show = (items, note, query = "") => { found = items; foundFor = query; active = 0; paint(note); };
   // Back to the saved city, dropping whatever was typed
   const reset = () => {
     clearTimeout(timer);
@@ -1103,27 +1249,29 @@ function slotField(kind, i, label) {
   input.addEventListener("blur", reset);
   input.addEventListener("input", () => {
     clearTimeout(timer);
+    // A search for older text may still answer, and mustn't
+    ctrl?.abort();
     const name = input.value.trim();
     if (name.length < 2) return show([]);
     timer = setTimeout(async () => {
-      ctrl?.abort();
       ctrl = new AbortController();
       try {
         const cities = await searchCities(name, ctrl.signal);
-        show(cities, cities.length ? "" : "No cities found");
+        show(cities, cities.length ? "" : "No cities found", name);
       } catch (err) {
         if (err.name !== "AbortError") show([], "City search is unavailable right now");
       }
     }, 250);
   });
   input.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if ((e.key === "ArrowDown" || e.key === "ArrowUp") && found.length) {
       e.preventDefault();
       active = (active + (e.key === "ArrowDown" ? 1 : found.length - 1)) % found.length;
       paint();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (found[active]) set(found[active]);
+      if (found[active] && foundFor === input.value.trim()) set(found[active]);
     } else if (e.key === "Escape" && list.children.length) {
       // Close the results first, the dialog on the next Escape
       e.preventDefault();

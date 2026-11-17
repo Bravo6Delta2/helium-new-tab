@@ -487,9 +487,16 @@ void main() {
       if (intro && time >= introCompleteAt(intro.startedAt, renderer.stripeCount())) intro = null;
     };
 
+    // The idle wave is slow, so it's drawn at about 30 fps. Every frame also redraws the
+    // blur of the glass on top. The intro and the speed-up wave get every frame.
+    const IDLE_FRAME = 1000 / 30 - 2;
+    let drawnAt = -Infinity;
     const loop = (time) => {
       frame = null;
-      drawFrame(time);
+      if (intro || speedUp || time - drawnAt >= IDLE_FRAME) {
+        drawnAt = time;
+        drawFrame(time);
+      }
       if (!reducedMotion.matches && !document.hidden) frame = requestAnimationFrame(loop);
     };
     const resume = () => {
