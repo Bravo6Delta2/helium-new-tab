@@ -1,8 +1,21 @@
+// Defaults. Time format, temperature unit, search engine and cities can be changed in
+// Settings (⌥ ,), and what's picked there wins over these.
 const CONFIG = {
   hour12: false,
+  fahrenheit: false,
 
   search: {
-    engine: "https://www.google.com/search?q=%s",
+    engine: "Google",
+    // The engines Settings offers. Add your own as name: URL, with %s for the search terms.
+    engines: {
+      Google: "https://www.google.com/search?q=%s",
+      DuckDuckGo: "https://duckduckgo.com/?q=%s",
+      Brave: "https://search.brave.com/search?q=%s",
+      Bing: "https://www.bing.com/search?q=%s",
+      Kagi: "https://kagi.com/search?q=%s",
+      Startpage: "https://www.startpage.com/do/search?query=%s",
+      Ecosia: "https://www.ecosia.org/search?q=%s",
+    },
     // Bangs come from Helium's own list (the one its address bar uses).
     // A bang that isn't in it is passed to DuckDuckGo, which knows a few thousand more.
     bangList: "https://services.helium.imput.net/bangs.json",
@@ -13,13 +26,10 @@ const CONFIG = {
   bangs: {
   },
 
-  // Defaults for the left and right slots, until cities are picked in Settings (⌥ ,).
-  // null leaves a slot empty. World clocks need a time zone, e.g.
-  // { name: "Tokyo", country: "Japan", tz: "Asia/Tokyo" }
-  cities: [
-    { name: "Nikšić",    lat: 42.7731, lon: 18.9445 },
-    { name: "Podgorica", lat: 42.4411, lon: 19.2636 },
-  ],
+  // The left and right slots. null leaves a slot empty. Weather needs coordinates,
+  // e.g. { name: "Tokyo", lat: 35.6895, lon: 139.6917 }, and world clocks a time zone,
+  // e.g. { name: "Tokyo", country: "Japan", tz: "Asia/Tokyo" }
+  cities: [null, null],
   clocks: [null, null],
 
   // A blocked request never loads, so bandwidth and time saved are estimates:
@@ -33,13 +43,22 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-const fmtTime = (d, timeZone) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: CONFIG.hour12, timeZone });
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 // Two slots each, left and right. Once saved, these win over CONFIG.
 const SLOTS = ["Left", "Right"];
-const settings = { weather: CONFIG.cities, clocks: CONFIG.clocks, ...store.get("settings") };
+const settings = {
+  weather: CONFIG.cities, clocks: CONFIG.clocks,
+  hour12: CONFIG.hour12, fahrenheit: CONFIG.fahrenheit, engine: CONFIG.search.engine,
+  ...store.get("settings"),
+};
 for (const k of ["weather", "clocks"]) settings[k] = SLOTS.map((_, i) => settings[k]?.[i] || null);
+// An engine since removed from CONFIG falls back to the first one
+if (!CONFIG.search.engines[settings.engine]) settings.engine = Object.keys(CONFIG.search.engines)[0];
+
+// "15:05", or "3:05 PM"
+const fmtTime = (d, timeZone) => d.toLocaleTimeString(settings.hour12 ? "en-US" : "en-GB",
+  { hour: settings.hour12 ? "numeric" : "2-digit", minute: "2-digit", hour12: settings.hour12, timeZone });
 
 // Tabler icons (MIT), the set Prism uses. Only the path data, wrapped by icon().
 const ICONS = {
@@ -61,6 +80,7 @@ const ICONS = {
   // Prism's own IconBang
   "bang": '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M21 21l-6 -6"/><path d="M10 13v.01"/><path d="M10 7v3"/>',
   "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>',
+  "chevron-down": '<path d="M6 9l6 6l6 -6"/>',
   "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
   "map-pin": '<path d="M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/><path d="M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0z"/>',
   "clock": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M12 7v5l3 3"/>',
@@ -77,12 +97,16 @@ const shimmer = window.startShimmer ? startShimmer($("shimmer")) : { emphasize()
 /* ---------- clock ---------- */
 function tick() {
   const now = new Date();
-  $("time").textContent = fmtTime(now);
+  paintTime(now);
+  setTimeout(tick, 1000 - now.getMilliseconds());
+}
+function paintTime(now) {
+  // AM and PM are set smaller, so the big clock keeps its size
+  $("time").innerHTML = esc(fmtTime(now)).replace(/\s?([AP]M)$/, '<span class="ampm">$1</span>');
   $("date").textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
   // A weather panel's clock shows the time in that city
   for (const el of document.querySelectorAll("[data-clock]")) el.textContent = fmtTime(now, el.dataset.clock || undefined);
   renderClocks(now);
-  setTimeout(tick, 1000 - now.getMilliseconds());
 }
 
 /* ---------- world clocks ---------- */
@@ -196,7 +220,7 @@ function resolve(raw) {
     if (/^[a-z][\w+.-]*:\/\//i.test(text)) return text;
     return (/^localhost\b/i.test(text) ? "http://" : "https://") + text;
   }
-  return fill(CONFIG.search.engine, text);
+  return fill(CONFIG.search.engines[settings.engine], text);
 }
 
 function updateBangHint() {
@@ -276,7 +300,8 @@ function weatherUrl(cities) {
     + `?latitude=${lat}&longitude=${lon}`
     + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m"
     + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,sunrise,sunset"
-    + "&wind_speed_unit=ms&timezone=auto&forecast_days=7";
+    + "&wind_speed_unit=ms&timezone=auto&forecast_days=7"
+    + (settings.fahrenheit ? "&temperature_unit=fahrenheit" : "");
 }
 
 // Air quality is a separate Open-Meteo API. Pollen is only modelled for Europe, and is 0 off-season.
@@ -324,7 +349,11 @@ async function getCached(url) {
 
 const deg = (t) => `${Math.round(t)}°`;
 const compass = (d) => ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(d / 45) % 8];
-const clockOf = (iso) => iso.slice(11, 16);
+// Open-Meteo gives times as the city's wall clock, "2026-11-17T06:52"
+const clockOf = (iso) => {
+  const h = Number(iso.slice(11, 13)), m = iso.slice(14, 16);
+  return settings.hour12 ? `${h % 12 || 12}:${m} ${h < 12 ? "AM" : "PM"}` : iso.slice(11, 16);
+};
 
 function renderCity(el, city, w, air) {
   const c = w.current, d = w.daily;
@@ -586,6 +615,7 @@ $("settings-open").title = `Settings (${shortcut})`;
 
 function openSettings() {
   closePanels();
+  renderGeneral();
   renderSlots();
   dialog.showModal();
   shimmer.emphasize();
@@ -606,9 +636,32 @@ document.addEventListener("keydown", (e) => {
 });
 
 function saveSettings(kind) {
-  store.set("settings", { weather: settings.weather, clocks: settings.clocks });
+  store.set("settings", settings);
   if (kind === "weather") { buildWeather(); loadWeather(); }
-  else renderClocks(new Date());
+  else if (kind === "clocks") renderClocks(new Date());
+  else if (kind === "hour12") { paintTime(new Date()); loadWeather(); }
+  else if (kind === "fahrenheit") loadWeather();
+}
+
+// Search engine, time format and temperature unit
+const engine = $("engine");
+engine.innerHTML = Object.keys(CONFIG.search.engines).map((name) => `<option>${esc(name)}</option>`).join("");
+$("engine-field").insertAdjacentHTML("beforeend", icon("chevron-down", 16));
+engine.addEventListener("change", () => { settings.engine = engine.value; saveSettings("engine"); });
+for (const seg of dialog.querySelectorAll(".seg[data-setting]")) {
+  seg.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-value]");
+    if (!b) return;
+    settings[seg.dataset.setting] = b.dataset.value === "true";
+    renderGeneral();
+    saveSettings(seg.dataset.setting);
+  });
+}
+function renderGeneral() {
+  engine.value = settings.engine;
+  for (const seg of dialog.querySelectorAll(".seg[data-setting]")) {
+    for (const b of seg.children) b.setAttribute("aria-pressed", b.dataset.value === String(settings[seg.dataset.setting]));
+  }
 }
 
 // Open-Meteo's geocoder, which also gives each city's time zone

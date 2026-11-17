@@ -170,6 +170,7 @@
   /* app.js fills these, and the browser can paint once before it runs. Reserving a
      line each keeps the search bar from jumping on reload. */
   .time, .date { min-height: 1lh; }
+  .time .ampm { margin-left: 0.12em; font-size: 0.32em; letter-spacing: 0; color: var(--secondary); }
 
   /* Prism Input / SearchBar */
   .input-field {
@@ -400,6 +401,21 @@
   .icon-btn:focus-visible { outline: 2px solid var(--primary); }
   .icon-btn[hidden] { display: none; }
 
+  /* Search engine, time format and temperature: a label and its control per row */
+  .prefs { display: grid; grid-template-columns: auto auto; justify-content: space-between; align-items: center; gap: 10px 16px; margin-bottom: 20px; }
+  .prefs > label, .prefs > span { font-size: 14px; color: var(--secondary); }
+  .prefs .seg { justify-self: end; }
+  .prefs .seg button { padding: 4px 10px; font-size: 13px; }
+  .input-field.select { position: relative; width: auto; min-height: 0; margin-top: 0; padding: 0; background: var(--helium-elevated-7); cursor: pointer; }
+  .input-field.select select {
+    appearance: none;
+    padding: 5px 30px 5px 10px;
+    border: 0; outline: 0; background: none;
+    color: inherit; font: inherit; font-size: 13px; letter-spacing: inherit;
+    cursor: pointer;
+  }
+  .input-field.select select option { background: var(--bg-surface); color: var(--primary); }
+  .input-field.select svg { position: absolute; right: 8px; color: var(--tertiary); pointer-events: none; }
   .slots { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap-1); margin-bottom: 20px; }
   .slot { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; }
   .slot > span { font-size: 13px; color: var(--tertiary); }
@@ -452,6 +468,19 @@
   <div class="s-head">
     <h4 id="settings-title">Settings</h4>
     <button class="icon-btn" id="settings-close" type="button" aria-label="Close"></button>
+  </div>
+  <h6 class="section">General</h6>
+  <div class="prefs">
+    <label for="engine">Search engine</label>
+    <div class="input-field select" id="engine-field"><select id="engine"></select></div>
+    <span id="hour12-label">Time format</span>
+    <div class="seg" role="group" aria-labelledby="hour12-label" data-setting="hour12">
+      <button type="button" data-value="false">24-hour</button><button type="button" data-value="true">12-hour</button>
+    </div>
+    <span id="fahrenheit-label">Temperature</span>
+    <div class="seg" role="group" aria-labelledby="fahrenheit-label" data-setting="fahrenheit">
+      <button type="button" data-value="false">°C</button><button type="button" data-value="true">°F</button>
+    </div>
   </div>
   <h6 class="section">Weather</h6>
   <p class="hint">Shown in the bottom corners. Leave a slot empty to hide it.</p>
