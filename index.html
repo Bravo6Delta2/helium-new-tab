@@ -221,6 +221,7 @@
     pointer-events: none;
   }
   .wx { position: relative; pointer-events: auto; }
+  .wx.end { margin-left: auto; }
   .panel {
     position: absolute; left: 0; bottom: calc(100% + 12px);
     width: 384px;
@@ -282,8 +283,95 @@
     box-shadow: 0 0 0 2.5px var(--bg-surface);
   }
 
+  /* World clocks in the top corners, mirroring the weather pills */
+  .clocks {
+    position: fixed; left: 5vw; right: 5vw; top: 4vh;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none;
+  }
+  .wc { display: grid; gap: 6px; }
+  .wc.end { margin-left: auto; text-align: right; }
+  .wc h6 { color: var(--tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
+  .wc-time { font-size: 34px; font-weight: 450; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .wc p { font-size: 14px; }
+
+  /* Settings: a gear at the bottom centre, and the dialog it opens */
+  .settings-btn {
+    position: fixed; left: 50%; bottom: 4vh; translate: -50% 0;
+    justify-content: center; width: 38px; padding: 0;
+    color: var(--secondary);
+    opacity: 0.6;
+  }
+  .settings-btn:hover, .settings-btn:focus-visible { opacity: 1; }
+
+  .settings {
+    width: min(440px, calc(100vw - 32px));
+    padding: 20px 20px 16px;
+    border: 0;
+    border-radius: var(--card-border-radius);
+    background: var(--panel);
+    backdrop-filter: blur(24px);
+    outline: 1.5px solid var(--helium-elevated-10); outline-offset: -1.5px;
+    box-shadow: 4px 8px 30px 0 var(--tooltip-shadow);
+    color: var(--primary);
+    text-align: left;
+    /* The city results hang below their field */
+    overflow: visible;
+  }
+  /* Same motion as the weather panels, both ways. allow-discrete keeps the dialog
+     shown (display, top layer) until it has faded out. */
+  .settings, .settings::backdrop {
+    transition: opacity 0.15s, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1),
+      display 0.2s allow-discrete, overlay 0.2s allow-discrete;
+  }
+  .settings { opacity: 0; transform: translateY(8px) scale(0.98); }
+  .settings[open] { opacity: 1; transform: none; }
+  .settings::backdrop { background: color-mix(in srgb, var(--bg-surface) 25%, transparent); opacity: 0; }
+  .settings[open]::backdrop { opacity: 1; }
+  @starting-style {
+    .settings[open] { opacity: 0; transform: translateY(8px) scale(0.98); }
+    .settings[open]::backdrop { opacity: 0; }
+  }
+  .s-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .settings .hint { font-size: 13px; color: var(--tertiary); margin-bottom: 10px; }
+  .settings kbd { font: inherit; padding: 1px 5px; border-radius: 5px; background: var(--helium-elevated-10); }
+
+  .icon-btn {
+    display: grid; place-items: center;
+    width: 30px; height: 30px; padding: 0;
+    border: 0; border-radius: 8px;
+    background: none; color: var(--tertiary);
+    cursor: pointer;
+    transition: 0.15s background-color;
+  }
+  .icon-btn:hover { background: var(--helium-elevated-10); color: var(--primary); }
+  .icon-btn:focus-visible { outline: 2px solid var(--primary); }
+  .icon-btn[hidden] { display: none; }
+
+  .slots { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap-1); margin-bottom: 20px; }
+  .slot { position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; }
+  .slot > span { font-size: 13px; color: var(--tertiary); }
+  .slot .input-field { width: 100%; min-height: 42px; margin-top: 0; padding: 6px 6px 6px 12px; background: var(--helium-elevated-7); }
+  .slot .country { font-size: 13px; color: var(--tertiary); white-space: nowrap; }
+  .slot .input-field:focus-within .country { display: none; }
+  .results {
+    position: absolute; z-index: 1; left: 52px; right: 0; top: calc(100% + 4px);
+    margin: 0; padding: 4px;
+    list-style: none;
+    border-radius: var(--mid-border-radius);
+    background: var(--bg-surface);
+    outline: 1.5px solid var(--helium-elevated-10); outline-offset: -1.5px;
+    box-shadow: 4px 8px 30px 0 var(--tooltip-shadow);
+  }
+  .results:empty { display: none; }
+  .results li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 9px 10px; border-radius: 8px; font-size: 15px; cursor: pointer; }
+  .results li small { font-size: 13px; color: var(--tertiary); text-align: right; }
+  .results li.active { background: var(--helium-elevated-10); }
+  .results li.note { color: var(--tertiary); cursor: default; }
+
   @media (prefers-reduced-motion: reduce) {
     #shimmer, .panel { transition-duration: 1ms; }
+    .settings, .settings::backdrop { transition-duration: 1ms; }
   }
 </style>
 </head>
@@ -301,7 +389,23 @@
   </form>
 </main>
 
+<section class="clocks" id="clocks" aria-label="World clock"></section>
 <section class="weather" id="weather"></section>
+<button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
+
+<dialog class="settings" id="settings" aria-labelledby="settings-title">
+  <div class="s-head">
+    <h4 id="settings-title">Settings</h4>
+    <button class="icon-btn" id="settings-close" type="button" aria-label="Close"></button>
+  </div>
+  <h6 class="section">Weather</h6>
+  <p class="hint">Shown in the bottom corners. Leave a slot empty to hide it.</p>
+  <div class="slots" data-kind="weather"></div>
+  <h6 class="section">World clock</h6>
+  <p class="hint">Time and date in the top corners. Leave a slot empty to hide it.</p>
+  <div class="slots" data-kind="clocks"></div>
+  <div class="p-foot"><a href="https://open-meteo.com/">City search by Open-Meteo</a><p><kbd id="shortcut"></kbd> opens and closes this</p></div>
+</dialog>
 
 <script src="shimmer.js"></script>
 <script src="app.js"></script>

@@ -13,10 +13,14 @@ const CONFIG = {
   bangs: {
   },
 
+  // Defaults for the left and right slots, until cities are picked in Settings (⌥ ,).
+  // null leaves a slot empty. World clocks need a time zone, e.g.
+  // { name: "Tokyo", country: "Japan", tz: "Asia/Tokyo" }
   cities: [
     { name: "Nikšić",    lat: 42.7731, lon: 18.9445 },
     { name: "Podgorica", lat: 42.4411, lon: 19.2636 },
   ],
+  clocks: [null, null],
 };
 
 /* ---------- small helpers ---------- */
@@ -25,7 +29,13 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
-const fmtTime = (d) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: CONFIG.hour12 });
+const fmtTime = (d, timeZone) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: CONFIG.hour12, timeZone });
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+// Two slots each, left and right. Once saved, these win over CONFIG.
+const SLOTS = ["Left", "Right"];
+const settings = { weather: CONFIG.cities, clocks: CONFIG.clocks, ...store.get("settings") };
+for (const k of ["weather", "clocks"]) settings[k] = SLOTS.map((_, i) => settings[k]?.[i] || null);
 
 // Tabler icons (MIT), the set Prism uses. Only the path data, wrapped by icon().
 const ICONS = {
@@ -46,6 +56,10 @@ const ICONS = {
   "sunset": '<path d="M3 13h1"/><path d="M20 13h1"/><path d="M5.6 6.6l.7 .7"/><path d="M18.4 6.6l-.7 .7"/><path d="M8 13a4 4 0 1 1 8 0"/><path d="M3 17h18"/><path d="M7 20h5"/><path d="M16 20h1"/><path d="M12 5v-1"/>',
   // Prism's own IconBang
   "bang": '<path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"/><path d="M21 21l-6 -6"/><path d="M10 13v.01"/><path d="M10 7v3"/>',
+  "settings": '<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>',
+  "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
+  "map-pin": '<path d="M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/><path d="M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0z"/>',
+  "clock": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M12 7v5l3 3"/>',
 };
 const icon = (name, size = 18) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -58,8 +72,34 @@ function tick() {
   const now = new Date();
   $("time").textContent = fmtTime(now);
   $("date").textContent = now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
-  for (const el of document.querySelectorAll("[data-clock]")) el.textContent = fmtTime(now);
+  // A weather panel's clock shows the time in that city
+  for (const el of document.querySelectorAll("[data-clock]")) el.textContent = fmtTime(now, el.dataset.clock || undefined);
+  renderClocks(now);
   setTimeout(tick, 1000 - now.getMilliseconds());
+}
+
+/* ---------- world clocks ---------- */
+// Minutes the zone is ahead of local time
+function tzOffset(tz, d) {
+  const wall = (timeZone) => new Date(d.toLocaleString("en-US", { timeZone }));
+  return Math.round((wall(tz) - wall()) / 60_000);
+}
+function offsetLabel(min) {
+  if (!min) return "Same time";
+  const a = Math.abs(min);
+  return `${min > 0 ? "+" : "−"}${Math.floor(a / 60)}h${a % 60 ? ` ${a % 60}m` : ""}`;
+}
+
+let clocksHtml = "";
+function renderClocks(now) {
+  const html = settings.clocks.map((city, i) => city ? `
+    <div class="wc${i ? " end" : ""}">
+      <h6>${esc(city.name)}</h6>
+      <div class="wc-time">${fmtTime(now, city.tz)}</div>
+      <p>${now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: city.tz })} · ${offsetLabel(tzOffset(city.tz, now))}</p>
+    </div>` : "").join("");
+  // Only touch the DOM when the minute changes, so text stays selectable
+  if (html !== clocksHtml) $("clocks").innerHTML = clocksHtml = html;
 }
 tick();
 
@@ -179,7 +219,7 @@ $("search").addEventListener("submit", (e) => e.preventDefault());
 
 // The box isn't focused on open, but typing anywhere on the page goes into it
 document.addEventListener("keydown", (e) => {
-  if (e.target === q || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target === q || e.metaKey || e.ctrlKey || e.altKey || $("settings").open) return;
   if (e.key.length === 1 || e.key === "Backspace") q.focus({ preventScroll: true });
 });
 
@@ -222,9 +262,9 @@ const describe = (code, isDay = true) => {
   return { text, icon: name === "sun" && !isDay ? "moon" : name };
 };
 
-function weatherUrl() {
-  const lat = CONFIG.cities.map((c) => c.lat).join(",");
-  const lon = CONFIG.cities.map((c) => c.lon).join(",");
+function weatherUrl(cities) {
+  const lat = cities.map((c) => c.lat).join(",");
+  const lon = cities.map((c) => c.lon).join(",");
   return "https://api.open-meteo.com/v1/forecast"
     + `?latitude=${lat}&longitude=${lon}`
     + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m,wind_direction_10m"
@@ -235,9 +275,9 @@ function weatherUrl() {
 // Air quality is a separate Open-Meteo API. Pollen is only modelled for Europe, and is 0 off-season.
 const POLLEN = { alder: "Alder", birch: "Birch", grass: "Grass", mugwort: "Mugwort", olive: "Olive", ragweed: "Ragweed" };
 
-function airUrl() {
-  const lat = CONFIG.cities.map((c) => c.lat).join(",");
-  const lon = CONFIG.cities.map((c) => c.lon).join(",");
+function airUrl(cities) {
+  const lat = cities.map((c) => c.lat).join(",");
+  const lon = cities.map((c) => c.lon).join(",");
   return "https://air-quality-api.open-meteo.com/v1/air-quality"
     + `?latitude=${lat}&longitude=${lon}`
     + "&current=european_aqi," + Object.keys(POLLEN).map((k) => k + "_pollen").join(",")
@@ -308,7 +348,7 @@ function renderCity(el, city, w, air) {
 
   el.innerHTML = `
     <div class="panel">
-      <div class="p-head"><h5>${city.name}</h5><h5 class="muted" data-clock>${fmtTime(new Date())}</h5></div>
+      <div class="p-head"><h5>${esc(city.name)}</h5><h5 class="muted" data-clock="${esc(w.timezone)}">${fmtTime(new Date(), w.timezone)}</h5></div>
       <div class="hero">
         <span class="hero-ic">${icon(now.icon, 44)}</span>
         <h1>${deg(c.temperature_2m)}</h1>
@@ -330,7 +370,7 @@ function renderCity(el, city, w, air) {
       <div class="p-foot"><a href="https://open-meteo.com/">Weather data by Open-Meteo</a><p>Updated ${clockOf(c.time)}</p></div>
     </div>
     <button class="button pill" type="button" aria-expanded="${el.classList.contains("open")}">
-      ${icon(now.icon)}<strong>${deg(c.temperature_2m)}</strong>${city.name}
+      ${icon(now.icon)}<strong>${deg(c.temperature_2m)}</strong>${esc(city.name)}
     </button>`;
 }
 
@@ -350,34 +390,190 @@ function closePanels(except) {
   }
 }
 
-const cards = CONFIG.cities.map((city, i) => {
-  const el = document.createElement("div");
-  el.className = "wx" + (i === CONFIG.cities.length - 1 && i > 0 ? " end" : "");
-  el.innerHTML = `<button class="button pill" type="button">${city.name}</button>`;
-  el.addEventListener("click", (e) => {
-    if (!e.target.closest(".pill")) return;
-    closePanels(el);
-    el.classList.toggle("open");
-    el.querySelector(".pill").setAttribute("aria-expanded", el.classList.contains("open"));
-    if (el.classList.contains("open")) shimmer.emphasize();
+// One card per filled slot. An empty left slot still leaves the right card on the right.
+let cards = [];
+function buildWeather() {
+  closePanels();
+  cards = settings.weather.flatMap((city, i) => {
+    if (!city) return [];
+    const el = document.createElement("div");
+    el.className = "wx" + (i === 1 ? " end" : "");
+    el.innerHTML = `<button class="button pill" type="button">${esc(city.name)}</button>`;
+    el.addEventListener("click", (e) => {
+      if (!e.target.closest(".pill")) return;
+      closePanels(el);
+      el.classList.toggle("open");
+      el.querySelector(".pill").setAttribute("aria-expanded", el.classList.contains("open"));
+      if (el.classList.contains("open")) shimmer.emphasize();
+    });
+    return [{ city, el }];
   });
-  $("weather").appendChild(el);
-  return el;
-});
+  $("weather").replaceChildren(...cards.map((c) => c.el));
+}
 document.addEventListener("click", (e) => { if (!e.target.closest(".wx")) closePanels(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanels(); });
 
 async function loadWeather() {
+  const list = cards;
+  if (!list.length) return;
+  const cities = list.map((c) => c.city);
   try {
     // Air quality is a nice-to-have, so the forecast shows without it
-    const [data, air] = await Promise.all([getCached(weatherUrl()), getCached(airUrl()).catch(() => [])]);
-    CONFIG.cities.forEach((city, i) => renderCity(cards[i], city, data[i], air[i]));
+    const [data, air] = await Promise.all([getCached(weatherUrl(cities)), getCached(airUrl(cities)).catch(() => [])]);
+    // The cities may have changed in Settings while this was loading
+    if (list !== cards) return;
+    list.forEach(({ city, el }, i) => renderCity(el, city, data[i], air[i]));
   } catch (err) {
-    cards.forEach((el, i) => {
-      el.querySelector(".pill").textContent = `${CONFIG.cities[i].name}: weather unavailable`;
+    if (list !== cards) return;
+    list.forEach(({ city, el }) => {
+      el.querySelector(".pill").textContent = `${city.name}: weather unavailable`;
     });
   }
 }
+buildWeather();
 loadWeather();
 setInterval(loadWeather, WEATHER_TTL);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadWeather(); });
+
+/* ---------- settings (⌥ , or the gear) ---------- */
+const dialog = $("settings");
+$("settings-open").innerHTML = icon("settings");
+$("settings-close").innerHTML = icon("x");
+// ⌘O and ⌘, belong to the browser, so the page uses Option/Alt + comma
+const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌥ ," : "Alt + ,";
+$("shortcut").textContent = shortcut;
+$("settings-open").title = `Settings (${shortcut})`;
+
+function openSettings() {
+  closePanels();
+  renderSlots();
+  dialog.showModal();
+  shimmer.emphasize();
+}
+$("settings-open").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", () => dialog.close());
+// A click on the backdrop closes it
+dialog.addEventListener("click", (e) => {
+  const r = dialog.getBoundingClientRect();
+  if (e.target === dialog && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom)) dialog.close();
+});
+document.addEventListener("keydown", (e) => {
+  // e.code, because ⌥ , types "≤" on a Mac
+  if (e.code !== "Comma" || !e.altKey || e.metaKey || e.ctrlKey) return;
+  e.preventDefault();
+  if (dialog.open) dialog.close();
+  else openSettings();
+});
+
+function saveSettings(kind) {
+  store.set("settings", { weather: settings.weather, clocks: settings.clocks });
+  if (kind === "weather") { buildWeather(); loadWeather(); }
+  else renderClocks(new Date());
+}
+
+// Open-Meteo's geocoder, which also gives each city's time zone
+async function searchCities(name, signal) {
+  const res = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=6&language=en&format=json&name=" + encodeURIComponent(name), { signal });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return ((await res.json()).results || []).filter((r) => r.timezone).map((r) => ({
+    name: r.name, region: r.admin1 ?? "", country: r.country ?? "",
+    lat: r.latitude, lon: r.longitude, tz: r.timezone,
+  }));
+}
+
+function renderSlots() {
+  for (const box of dialog.querySelectorAll(".slots")) {
+    box.replaceChildren(...SLOTS.map((label, i) => slotField(box.dataset.kind, i, label)));
+  }
+}
+
+function slotField(kind, i, label) {
+  const el = document.createElement("div");
+  el.className = "slot";
+  const id = `results-${kind}-${i}`;
+  el.innerHTML = `
+    <span>${label}</span>
+    <div class="input-field">
+      <span class="accessory">${icon(kind === "weather" ? "map-pin" : "clock", 16)}</span>
+      <input type="text" placeholder="Add a city" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${id}"
+        aria-label="${label} ${kind === "weather" ? "weather" : "world clock"} city" autocomplete="off" spellcheck="false">
+      <span class="country"></span>
+      <button class="icon-btn" type="button" aria-label="Remove ${label.toLowerCase()} city">${icon("x", 16)}</button>
+    </div>
+    <ul class="results" id="${id}" role="listbox"></ul>`;
+  const input = el.querySelector("input"), list = el.querySelector(".results");
+  const country = el.querySelector(".country"), remove = el.querySelector(".icon-btn");
+  let found = [], active = 0, timer, ctrl;
+
+  const paint = (note) => {
+    list.innerHTML = note ? `<li class="note">${note}</li>` : found.map((c, j) =>
+      `<li role="option" data-j="${j}" class="${j === active ? "active" : ""}" aria-selected="${j === active}">
+        ${esc(c.name)}<small>${esc([c.region, c.country].filter(Boolean).join(", "))}</small>
+      </li>`).join("");
+    input.setAttribute("aria-expanded", list.children.length > 0);
+  };
+  const show = (items, note) => { found = items; active = 0; paint(note); };
+  // Back to the saved city, dropping whatever was typed
+  const reset = () => {
+    clearTimeout(timer);
+    ctrl?.abort();
+    const city = settings[kind][i];
+    input.value = city?.name ?? "";
+    country.textContent = city?.country ?? "";
+    remove.hidden = !city;
+    show([]);
+  };
+  const set = (city) => {
+    settings[kind][i] = city;
+    saveSettings(kind);
+    reset();
+  };
+
+  input.addEventListener("focus", () => input.select());
+  input.addEventListener("blur", reset);
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const name = input.value.trim();
+    if (name.length < 2) return show([]);
+    timer = setTimeout(async () => {
+      ctrl?.abort();
+      ctrl = new AbortController();
+      try {
+        const cities = await searchCities(name, ctrl.signal);
+        show(cities, cities.length ? "" : "No cities found");
+      } catch (err) {
+        if (err.name !== "AbortError") show([], "City search is unavailable right now");
+      }
+    }, 250);
+  });
+  input.addEventListener("keydown", (e) => {
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && found.length) {
+      e.preventDefault();
+      active = (active + (e.key === "ArrowDown" ? 1 : found.length - 1)) % found.length;
+      paint();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (found[active]) set(found[active]);
+    } else if (e.key === "Escape" && list.children.length) {
+      // Close the results first, the dialog on the next Escape
+      e.preventDefault();
+      e.stopPropagation();
+      reset();
+    }
+  });
+  // mousedown would blur the input and clear the list before the click lands
+  list.addEventListener("mousedown", (e) => e.preventDefault());
+  list.addEventListener("mousemove", (e) => {
+    const j = Number(e.target.closest("[data-j]")?.dataset.j ?? active);
+    if (j !== active) { active = j; paint(); }
+  });
+  list.addEventListener("click", (e) => {
+    const li = e.target.closest("[data-j]");
+    if (li) set(found[li.dataset.j]);
+  });
+  remove.addEventListener("click", () => set(null));
+  el.querySelector(".input-field").addEventListener("click", (e) => { if (!e.target.closest("button")) input.focus(); });
+
+  reset();
+  return el;
+}
