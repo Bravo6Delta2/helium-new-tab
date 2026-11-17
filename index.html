@@ -61,6 +61,10 @@
     --panel: color-mix(in srgb, #fbfcff 78%, transparent);
     --bar-start: #8fa0ec;
     --bar-end: var(--helium-blue);
+    /* Privacy report categories */
+    --trackers: var(--helium-blue);
+    --ads: #e8833a;
+    --other: #9aa3c4;
 
     /* GradientShimmer settings, from Prism's GradientShimmer.svelte */
     --shimmer-alpha: 0.35;
@@ -95,6 +99,9 @@
       --panel: color-mix(in srgb, #0e1123 72%, transparent);
       --bar-start: #5a6cc4;
       --bar-end: var(--helium-elevated);
+      --trackers: #7d92f5;
+      --ads: #f0a066;
+      --other: #5c6690;
 
       --shimmer-alpha: 0.7;
       --shimmer-grain-alpha: 0.15;
@@ -295,9 +302,51 @@
   .wc-time { font-size: 34px; font-weight: 450; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
   .wc p { font-size: 14px; }
 
-  /* Settings: a gear at the bottom centre, and the dialog it opens */
-  .settings-btn {
+  /* Bottom centre: the uBlock pill and the settings gear */
+  .dock {
     position: fixed; left: 50%; bottom: 4vh; translate: -50% 0;
+    display: flex; align-items: flex-end; gap: 8px;
+  }
+  .wx.center .panel { left: 50%; translate: -50% 0; transform-origin: bottom center; }
+
+  /* Privacy report: blocked requests split into trackers, ads and other */
+  .p-head:has(.seg) { align-items: center; }
+  .seg { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--helium-elevated-7); }
+  .seg button {
+    padding: 3px 8px;
+    border: 0; border-radius: 7px;
+    background: none; color: var(--tertiary);
+    font: inherit; font-size: 12px; letter-spacing: inherit;
+    cursor: pointer;
+    transition: 0.15s background-color, 0.15s color;
+  }
+  .seg button:hover { color: var(--primary); }
+  .seg button[aria-pressed="true"] { background: var(--helium-elevated-15); color: var(--primary); }
+  .seg button:focus-visible { outline: 2px solid var(--primary); outline-offset: -1px; }
+  .k-trackers { background: var(--trackers); }
+  .k-ads { background: var(--ads); }
+  .k-other { background: var(--other); }
+  .split { display: flex; gap: 2px; height: 8px; margin: -4px 0 10px; border-radius: 4px; overflow: hidden; background: var(--helium-elevated-10); }
+  .split i { min-width: 3px; }
+  .legend { display: flex; gap: 16px; margin: 0 0 18px; padding: 0; list-style: none; font-size: 13px; color: var(--secondary); }
+  .legend li { display: flex; align-items: center; gap: 6px; }
+  .legend strong { color: var(--primary); font-variant-numeric: tabular-nums; }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+  .top { list-style: none; margin: 0; padding: 0; font-variant-numeric: tabular-nums; }
+  .top li {
+    display: grid; grid-template-columns: 8px minmax(0, 1fr) 96px 52px; align-items: center; gap: 10px;
+    height: 34px; padding: 0 8px; margin: 0 -8px;
+    border-radius: 10px;
+    font-size: 15px;
+    transition: 0.15s background-color;
+  }
+  .top li:hover { background: var(--helium-elevated-10); }
+  .top li.muted { display: block; line-height: 34px; }
+  .top .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top .n { text-align: right; color: var(--secondary); }
+
+  /* Settings: the gear, and the dialog it opens */
+  .settings-btn {
     justify-content: center; width: 38px; padding: 0;
     color: var(--secondary);
     opacity: 0.6;
@@ -391,7 +440,10 @@
 
 <section class="clocks" id="clocks" aria-label="World clock"></section>
 <section class="weather" id="weather"></section>
-<button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
+<div class="dock">
+  <div class="wx center" id="ublock" hidden></div>
+  <button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
+</div>
 
 <dialog class="settings" id="settings" aria-labelledby="settings-title">
   <div class="s-head">

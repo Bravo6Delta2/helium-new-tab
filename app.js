@@ -21,6 +21,10 @@ const CONFIG = {
     { name: "Podgorica", lat: 42.4411, lon: 19.2636 },
   ],
   clocks: [null, null],
+
+  // A blocked request never loads, so bandwidth and time saved are estimates:
+  // rough averages per blocked request, about the ratios Brave's new tab uses.
+  ublock: { bytesPerBlock: 45_000, msPerBlock: 50 },
 };
 
 /* ---------- small helpers ---------- */
@@ -60,6 +64,9 @@ const ICONS = {
   "x": '<path d="M18 6l-12 12"/><path d="M6 6l12 12"/>',
   "map-pin": '<path d="M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/><path d="M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0z"/>',
   "clock": '<path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0"/><path d="M12 7v5l3 3"/>',
+  "shield": '<path d="M12 3a12 12 0 0 0 8.5 3a12 12 0 0 1 -8.5 15a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3"/>',
+  "download": '<path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"/><path d="M7 11l5 5l5 -5"/><path d="M12 4l0 12"/>',
+  "hourglass": '<path d="M6.5 7h11"/><path d="M6.5 17h11"/><path d="M6 20v-2a6 6 0 1 1 12 0v2a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1z"/><path d="M6 4v2a6 6 0 1 0 12 0v-2a1 1 0 0 0 -1 -1h-10a1 1 0 0 0 -1 1z"/>',
 };
 const icon = (name, size = 18) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -390,6 +397,17 @@ function closePanels(except) {
   }
 }
 
+// A .wx holds a pill and the panel it opens
+function bindPanel(el) {
+  el.addEventListener("click", (e) => {
+    if (!e.target.closest(".pill")) return;
+    closePanels(el);
+    el.classList.toggle("open");
+    el.querySelector(".pill").setAttribute("aria-expanded", el.classList.contains("open"));
+    if (el.classList.contains("open")) shimmer.emphasize();
+  });
+}
+
 // One card per filled slot. An empty left slot still leaves the right card on the right.
 let cards = [];
 function buildWeather() {
@@ -399,13 +417,7 @@ function buildWeather() {
     const el = document.createElement("div");
     el.className = "wx" + (i === 1 ? " end" : "");
     el.innerHTML = `<button class="button pill" type="button">${esc(city.name)}</button>`;
-    el.addEventListener("click", (e) => {
-      if (!e.target.closest(".pill")) return;
-      closePanels(el);
-      el.classList.toggle("open");
-      el.querySelector(".pill").setAttribute("aria-expanded", el.classList.contains("open"));
-      if (el.classList.contains("open")) shimmer.emphasize();
-    });
+    bindPanel(el);
     return [{ city, el }];
   });
   $("weather").replaceChildren(...cards.map((c) => c.el));
@@ -434,6 +446,134 @@ buildWeather();
 loadWeather();
 setInterval(loadWeather, WEATHER_TTL);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadWeather(); });
+
+/* ---------- uBlock Origin stats ---------- */
+// background.js counts what uBlock Origin blocks. Opened as a plain file:// page there's
+// no extension storage, and the pill stays hidden.
+const KINDS = [["trackers", "Trackers"], ["ads", "Ads"], ["other", "Other"]];
+// [id, label, days]. background.js keeps 90 days.
+const PERIODS = [["today", "Today", 1], ["7d", "7D", 7], ["30d", "30D", 30], ["90d", "90D", 90]];
+let period = PERIODS.find(([id]) => id === store.get("ublock:period"))?.[0] ?? "30d";
+
+const ublock = $("ublock");
+ublock.innerHTML = `
+  <div class="panel">
+    <div class="p-head"><h5>Privacy report</h5><div class="seg" role="group" aria-label="Period">
+      ${PERIODS.map(([id, label]) => `<button type="button" data-period="${id}">${label}</button>`).join("")}
+    </div></div>
+    <div class="report"></div>
+  </div>
+  <button class="button pill" type="button" aria-expanded="false">${icon("shield")}<strong></strong>blocked</button>`;
+bindPanel(ublock);
+ublock.querySelector(".seg").addEventListener("click", (e) => {
+  const id = e.target.closest("[data-period]")?.dataset.period;
+  if (!id) return;
+  period = id;
+  store.set("ublock:period", id);
+  showUblock();
+});
+
+const compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+const count = new Intl.NumberFormat("en-US");
+const dayOf = (d) => d.toLocaleDateString("en-CA"); // YYYY-MM-DD, local time
+const fmtDay = (day) => new Date(day + "T12:00").toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayOf(d); };
+
+function fmtBytes(b) {
+  const units = ["KB", "MB", "GB", "TB"];
+  let i = 0;
+  for (b /= 1000; b >= 1000 && i < units.length - 1; i++) b /= 1000;
+  return `${b < 10 ? b.toFixed(2) : b < 100 ? b.toFixed(1) : Math.round(b)} ${units[i]}`;
+}
+function fmtDuration(ms) {
+  const min = ms / 60_000;
+  if (min < 1) return `${Math.round(ms / 1000)} s`;
+  if (min < 60) return `${Math.round(min)} min`;
+  return `${(min / 60).toFixed(min < 600 ? 1 : 0)} h`;
+}
+
+function renderUblock({ start, days }) {
+  const [, , length] = PERIODS.find(([id]) => id === period);
+  const from = daysAgo(length - 1);
+
+  // Sum the period, and each company's or domain's share of it
+  const sum = { trackers: 0, ads: 0, other: 0 }, sources = {};
+  for (const [day, d] of Object.entries(days)) {
+    if (day < from) continue;
+    for (const k in sum) sum[k] += d[k];
+    // Per kind, in KINDS order
+    for (const [name, counts] of Object.entries(d.sources)) {
+      const s = sources[name] ??= [0, 0, 0];
+      counts.forEach((n, i) => { s[i] += n; });
+    }
+  }
+  const blocked = sum.trackers + sum.ads + sum.other;
+  // Each source's total, coloured by what it mostly is
+  const top = Object.entries(sources)
+    .map(([name, s]) => [name, KINDS[s.indexOf(Math.max(...s))][0], s[0] + s[1] + s[2]])
+    .sort((a, b) => b[2] - a[2])
+    .slice(0, 5);
+
+  let note;
+  if (length === 1) note = "Since midnight";
+  else if (start > from) note = `Counting since ${fmtDay(start)}`;
+  else note = `${count.format(Math.round(blocked / length))} a day on average`;
+
+  ublock.hidden = false;
+  const pill = ublock.querySelector(".pill");
+  pill.querySelector("strong").textContent = compact.format(blocked);
+  pill.title = length === 1 ? "Blocked today" : `Blocked in the last ${length} days`;
+  for (const b of ublock.querySelectorAll("[data-period]")) b.setAttribute("aria-pressed", b.dataset.period === period);
+  ublock.querySelector(".report").innerHTML = `
+    <div class="hero">
+      <span class="hero-ic">${icon("shield", 44)}</span>
+      <h1 title="${count.format(blocked)}">${compact.format(blocked)}</h1>
+      <div class="hero-meta">
+        <h4>Requests blocked</h4>
+        <p>${note}</p>
+      </div>
+    </div>
+    <div class="split">${KINDS.filter(([k]) => sum[k]).map(([k]) => `<i class="k-${k}" style="flex-grow:${sum[k]}"></i>`).join("")}</div>
+    <ul class="legend">${KINDS.map(([k, name]) => `<li><span class="dot k-${k}"></span>${name}<strong>${count.format(sum[k])}</strong></li>`).join("")}</ul>
+    <div class="stats">
+      <div class="card">${icon("download")}<div><p>Bandwidth saved</p><h4>${fmtBytes(blocked * CONFIG.ublock.bytesPerBlock)}</h4></div></div>
+      <div class="card">${icon("hourglass")}<div><p>Time saved</p><h4>${fmtDuration(blocked * CONFIG.ublock.msPerBlock)}</h4></div></div>
+    </div>
+    <h6 class="section">Most blocked</h6>
+    <ol class="top">${top.length ? top.map(([name, kind, n]) => `<li>
+      <span class="dot k-${kind}"></span>
+      <span class="name">${esc(name)}</span>
+      <span class="bar"><i style="width:${(n / top[0][2]) * 100}%"></i></span>
+      <span class="n">${count.format(n)}</span>
+    </li>`).join("") : `<li class="muted">Nothing blocked yet</li>`}</ol>
+    <div class="p-foot"><a href="https://disconnect.me/trackerprotection">Categories by Disconnect</a><p>Bandwidth and time are estimates</p></div>`;
+}
+
+// background.js keeps "start" and a "day:YYYY-MM-DD" key per day, and saves every 5 s
+// while pages load. Tabs in the background wait to re-render.
+const ublockData = { start: null, days: {} };
+const showUblock = () => { if (ublockData.start && !document.hidden) renderUblock(ublockData); };
+if (globalThis.chrome?.storage) {
+  const dayKeys = Array.from({ length: PERIODS.at(-1)[2] }, (_, i) => "day:" + daysAgo(i));
+  chrome.storage.local.get(["start", ...dayKeys]).then((got) => {
+    ublockData.start = got.start;
+    for (const k of dayKeys) if (got[k]) ublockData.days[k.slice(4)] = got[k];
+    showUblock();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    let changed = false;
+    for (const [k, { newValue }] of Object.entries(changes)) {
+      if (k === "start") ublockData.start = newValue;
+      else if (!k.startsWith("day:")) continue;
+      else if (newValue) ublockData.days[k.slice(4)] = newValue;
+      else delete ublockData.days[k.slice(4)];
+      changed = true;
+    }
+    if (changed) showUblock();
+  });
+  document.addEventListener("visibilitychange", showUblock);
+}
 
 /* ---------- settings (⌥ , or the gear) ---------- */
 const dialog = $("settings");
