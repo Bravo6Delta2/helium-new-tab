@@ -39,6 +39,8 @@ const ICONS = {
   "cloud-storm": '<path d="M7 18a4.6 4.4 0 0 1 0 -9a5 4.5 0 0 1 11 2h1a3.5 3.5 0 0 1 0 7h-1"/><path d="M13 14l-2 4l3 0l-2 4"/>',
   "wind": '<path d="M5 8h8.5a2.5 2.5 0 1 0 -2.34 -3.24"/><path d="M3 12h15.5a2.5 2.5 0 1 1 -2.34 3.24"/><path d="M4 16h5.5a2.5 2.5 0 1 1 -2.34 3.24"/>',
   "umbrella": '<path d="M4 12a8 8 0 0 1 16 0l-16 0"/><path d="M12 12v6a2 2 0 0 0 4 0"/>',
+  "leaf": '<path d="M5 21c.5 -4.5 2.5 -8 7 -10"/><path d="M9 18c6.218 0 10.5 -3.288 11 -12v-2h-4.014c-9 0 -11.986 4 -12 9c0 1 0 3 2 5h3z"/>',
+  "flower": '<path d="M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/><path d="M12 2a3 3 0 0 1 3 3c0 .562 -.259 1.442 -.776 2.64l-.724 1.36l1.76 -1.893c.499 -.6 .922 -1 1.27 -1.205a2.968 2.968 0 0 1 4.07 1.099a3.011 3.011 0 0 1 -1.09 4.098c-.374 .217 -.99 .396 -1.846 .535l-2.664 .366l2.4 .326c1 .145 1.698 .337 2.11 .576a3.011 3.011 0 0 1 1.09 4.098a2.968 2.968 0 0 1 -4.07 1.098c-.348 -.202 -.771 -.604 -1.27 -1.205l-1.76 -1.893l.724 1.36c.516 1.199 .776 2.079 .776 2.64a3 3 0 0 1 -6 0c0 -.562 .259 -1.442 .776 -2.64l.724 -1.36l-1.76 1.893c-.499 .601 -.922 1 -1.27 1.205a2.968 2.968 0 0 1 -4.07 -1.098a3.011 3.011 0 0 1 1.09 -4.098c.374 -.218 .99 -.396 1.846 -.536l2.664 -.366l-2.4 -.325c-1 -.145 -1.698 -.337 -2.11 -.576a3.011 3.011 0 0 1 -1.09 -4.099a2.968 2.968 0 0 1 4.07 -1.099c.348 .203 .771 .604 1.27 1.205l1.76 1.894c-1 -2.292 -1.5 -3.625 -1.5 -4a3 3 0 0 1 3 -3z"/>',
   "droplet": '<path d="M7.502 19.423c2.602 2.105 6.395 2.105 8.996 0c2.602 -2.105 3.262 -5.708 1.566 -8.546l-4.89 -7.26c-.42 -.625 -1.287 -.803 -1.936 -.397a1.376 1.376 0 0 0 -.41 .397l-4.893 7.26c-1.695 2.838 -1.035 6.441 1.567 8.546"/>',
   "sunrise": '<path d="M3 17h1m16 0h1m-15.4 -6.4l.7 .7m12.1 -.7l-.7 .7m-9.7 5.7a4 4 0 0 1 8 0"/><path d="M3 21l18 0"/><path d="M12 9v-6l3 3m-6 0l3 -3"/>',
   "sunset": '<path d="M3 13h1"/><path d="M20 13h1"/><path d="M5.6 6.6l.7 .7"/><path d="M18.4 6.6l-.7 .7"/><path d="M8 13a4 4 0 1 1 8 0"/><path d="M3 17h18"/><path d="M7 20h5"/><path d="M16 20h1"/><path d="M12 5v-1"/>',
@@ -230,9 +232,35 @@ function weatherUrl() {
     + "&wind_speed_unit=ms&timezone=auto&forecast_days=7";
 }
 
-async function getWeather() {
+// Air quality is a separate Open-Meteo API. Pollen is only modelled for Europe, and is 0 off-season.
+const POLLEN = { alder: "Alder", birch: "Birch", grass: "Grass", mugwort: "Mugwort", olive: "Olive", ragweed: "Ragweed" };
+
+function airUrl() {
+  const lat = CONFIG.cities.map((c) => c.lat).join(",");
+  const lon = CONFIG.cities.map((c) => c.lon).join(",");
+  return "https://air-quality-api.open-meteo.com/v1/air-quality"
+    + `?latitude=${lat}&longitude=${lon}`
+    + "&current=european_aqi," + Object.keys(POLLEN).map((k) => k + "_pollen").join(",")
+    + "&timezone=auto";
+}
+
+// European AQI bands
+const AQI = [[20, "Good"], [40, "Fair"], [60, "Moderate"], [80, "Poor"], [100, "Very poor"], [Infinity, "Extremely poor"]];
+const aqiLabel = (v) => AQI.find(([max]) => v <= max)[1];
+// Rough levels in grains/m³. The official thresholds differ a little per plant.
+const pollenLevel = (v) => v < 1 ? "None" : v < 10 ? "Low" : v < 50 ? "Moderate" : "High";
+
+function topPollen(current) {
+  let top = null;
+  for (const [key, name] of Object.entries(POLLEN)) {
+    const v = current[key + "_pollen"];
+    if (v != null && (!top || v > top.v)) top = { name, v };
+  }
+  return top;
+}
+
+async function getCached(url) {
   // One request covers every city. Open-Meteo returns an array when given several coordinates.
-  const url = weatherUrl();
   const cached = store.get("wx:" + url);
   if (cached && Date.now() - cached.at < WEATHER_TTL) return cached.data;
   try {
@@ -251,7 +279,7 @@ const deg = (t) => `${Math.round(t)}°`;
 const compass = (d) => ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(d / 45) % 8];
 const clockOf = (iso) => iso.slice(11, 16);
 
-function renderCity(el, city, w) {
+function renderCity(el, city, w, air) {
   const c = w.current, d = w.daily;
   const now = describe(c.weather_code, c.is_day);
   const weekLo = Math.min(...d.temperature_2m_min), weekHi = Math.max(...d.temperature_2m_max);
@@ -294,6 +322,7 @@ function renderCity(el, city, w) {
         <div class="card">${icon("wind")}<div><p>Wind</p><h4>${c.wind_speed_10m.toFixed(1)} m/s ${compass(c.wind_direction_10m)}</h4></div></div>
         <div class="card">${icon("umbrella")}<div><p>Rain today</p><h4>${d.precipitation_sum[0].toFixed(1)} mm · ${d.precipitation_probability_max[0] ?? 0}%</h4></div></div>
         <div class="card">${icon("droplet")}<div><p>Humidity</p><h4>${c.relative_humidity_2m}%</h4></div></div>
+        ${airCards(air)}
         <div class="card">${sun}</div>
       </div>
       <h6 class="section">7-day forecast</h6>
@@ -303,6 +332,14 @@ function renderCity(el, city, w) {
     <button class="button pill" type="button" aria-expanded="${el.classList.contains("open")}">
       ${icon(now.icon)}<strong>${deg(c.temperature_2m)}</strong>${city.name}
     </button>`;
+}
+
+function airCards(air) {
+  const aqi = air?.current?.european_aqi;
+  if (aqi == null) return "";
+  const pollen = topPollen(air.current);
+  return `<div class="card">${icon("leaf")}<div><p>Air quality · ${Math.round(aqi)}</p><h4>${aqiLabel(aqi)}</h4></div></div>
+        ${pollen ? `<div class="card">${icon("flower")}<div><p>Pollen${pollen.v >= 1 ? ` · ${pollen.name}` : ""}</p><h4>${pollenLevel(pollen.v)}</h4></div></div>` : ""}`;
 }
 
 function closePanels(except) {
@@ -332,8 +369,9 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePanel
 
 async function loadWeather() {
   try {
-    const data = await getWeather();
-    CONFIG.cities.forEach((city, i) => renderCity(cards[i], city, data[i]));
+    // Air quality is a nice-to-have, so the forecast shows without it
+    const [data, air] = await Promise.all([getCached(weatherUrl()), getCached(airUrl()).catch(() => [])]);
+    CONFIG.cities.forEach((city, i) => renderCity(cards[i], city, data[i], air[i]));
   } catch (err) {
     cards.forEach((el, i) => {
       el.querySelector(".pill").textContent = `${CONFIG.cities[i].name}: weather unavailable`;
