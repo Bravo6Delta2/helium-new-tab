@@ -91,3 +91,7 @@ Browsing activity is read from the browser's own history and cleared when you de
 - [Open-Meteo](https://open-meteo.com): weather, air quality and geocoding
 - [Disconnect tracking protection list](https://github.com/disconnectme/disconnect-tracking-protection) (CC BY-NC-SA 4.0)
 - Bangs from [Helium](https://github.com/imputnet/helium) and [Kagi](https://github.com/kagisearch/bangs)
+
+## License
+
+[GPL-3.0](LICENSE), as `shimmer.js` is ported from Helium Prism, which is GPL-3.0.
