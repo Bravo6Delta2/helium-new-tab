@@ -46,6 +46,9 @@ const store = {
     catch (err) { console.warn(`Couldn't save "${k}":`, err); return false; }
   },
 };
+// Older versions kept the browsing activity cache here, where background.js can't remove
+// it when history is deleted. It moved to extension storage (see buildActivity).
+try { localStorage.removeItem("activity"); } catch {}
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 // A zone the browser doesn't know makes every date function given it throw
@@ -169,9 +172,10 @@ tick();
 const q = $("q");
 $("search-icon").innerHTML = icon("search");
 
-// A function as the replacement, so "$&" and the like in the terms stay as typed
+// Every %s, as a template can use the terms twice. A function as the replacement, so "$&"
+// and the like in the terms stay as typed.
 function fill(template, terms) {
-  return template.replace("%s", () => encodeURIComponent(terms));
+  return template.replaceAll("%s", () => encodeURIComponent(terms));
 }
 
 function findBang(text) {
@@ -232,7 +236,7 @@ const ownBang = (key) => Object.hasOwn(CONFIG.bangs, key) ? CONFIG.bangs[key] : 
 
 function lookupBang(key) {
   const own = ownBang(key);
-  if (own) return { s: own[0], u: own[1].replace("%s", "{searchTerms}") };
+  if (own) return { s: own[0], u: own[1].replaceAll("%s", "{searchTerms}") };
   return heliumBangs?.get(key) || null;
 }
 
@@ -241,7 +245,7 @@ function runBang(bang, terms) {
   if (!terms) {
     // With no terms, Kagi opens the site's root (snap domain) or the search page's path (base path)
     try {
-      const url = new URL(bang.u.replace("{searchTerms}", ""));
+      const url = new URL(bang.u.replaceAll("{searchTerms}", ""));
       return f & FLAG.OPEN_SNAP_DOMAIN ? url.origin : f & FLAG.OPEN_BASE_PATH ? url.origin + url.pathname : url.href;
     } catch {
       return null;
@@ -250,7 +254,7 @@ function runBang(bang, terms) {
   let q = terms;
   if (f & FLAG.ENCODE) q = encodeURIComponent(q);
   if (f & FLAG.SPACE_TO_PLUS) q = q.replace(/%20| /g, "+");
-  return bang.u.replace("{searchTerms}", () => q);
+  return bang.u.replaceAll("{searchTerms}", () => q);
 }
 
 function resolve(raw) {
@@ -357,7 +361,7 @@ function matchBangs(prefix) {
   return [...own, ...found]
     .sort((a, b) => (b.t === prefix) - (a.t === prefix) || a.t.length - b.t.length || b.n - a.n)
     .slice(0, SUGGEST_MAX)
-    .map((b) => ({ bang: b.t, title: b.s, url: b.u.replace(/\{searchTerms\}|%s/, "") }));
+    .map((b) => ({ bang: b.t, title: b.s, url: b.u.replace(/\{searchTerms\}|%s/g, "") }));
 }
 
 // Result pages of the engines in Settings, which would crowd out the pages themselves
@@ -488,6 +492,9 @@ document.addEventListener("keydown", (e) => {
 
 /* ---------- weather (Open-Meteo) ---------- */
 const WEATHER_TTL = 15 * 60_000;
+// Current conditions older than this are from a saved copy that couldn't be refreshed, and
+// say when they're from
+const WEATHER_STALE = 60 * 60_000;
 
 // WMO weather code -> [description, icon]. "sun" turns into "moon" at night.
 const WMO = {
@@ -593,25 +600,53 @@ const fixed = (v, unit) => has(v) ? `${v.toFixed(1)} ${unit}` : "–";
 const compass = (d) => has(d) ? ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][Math.round(d / 45) % 8] : "";
 // Open-Meteo gives times as the city's wall clock, "2026-11-17T06:52"
 const clockOf = (iso) => {
+  if (typeof iso !== "string") return "–";
   const h = Number(iso.slice(11, 13)), m = iso.slice(14, 16);
   return settings.hour12 ? `${h % 12 || 12}:${m} ${h < 12 ? "AM" : "PM"}` : iso.slice(11, 16);
 };
+// The same, with the day when it isn't today: "Mon, Nov 16, 22:00"
+const whenOf = (iso, today) => typeof iso === "string" && iso.slice(0, 10) !== today
+  ? `${new Date(iso.slice(0, 10) + "T12:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}, ${clockOf(iso)}`
+  : clockOf(iso);
+
+const isStale = (now, time) => !(Date.parse(now + "Z") - Date.parse(time + "Z") <= WEATHER_STALE);
+
+// What a forecast says depends on the city's date and time, as a saved copy is shown
+// offline: which day is today, whether the sun has set, and how old the conditions are.
+// The key changes when any of them does, for the card to be drawn again.
+function weatherNow(w) {
+  const at = new Date();
+  // The zone, for summer time since the forecast was fetched, or else its offset then
+  const min = validTz(w.timezone) ? utcOffset(w.timezone, at) : (w.utc_offset_seconds ?? 0) / 60;
+  const now = new Date(at.getTime() + min * 60_000).toISOString().slice(0, 16), today = now.slice(0, 10);
+  const first = w.daily.time.indexOf(today);
+  const sunsetPassed = first !== -1 && typeof w.daily.sunset[first] === "string" && now > w.daily.sunset[first];
+  // NaN, for conditions without a time, counts as stale
+  const stale = isStale(now, w.current.time);
+  return { now, today, first, sunsetPassed, stale, key: [today, first, sunsetPassed, stale].join() };
+}
 
 function renderCity(el, city, w, air) {
   const c = w.current, d = w.daily;
   const now = describe(c.weather_code, c.is_day);
-  const weekLo = Math.min(...d.temperature_2m_min.filter(has)), weekHi = Math.max(...d.temperature_2m_max.filter(has));
+  const { now: cityNow, today, first, sunsetPassed, stale, key } = weatherNow(w);
+  // From the city's today on. A saved week that's all past has no days left.
+  const shown = first === -1 ? [] : d.time.slice(first).map((_, k) => first + k);
+  const weekLo = Math.min(...shown.map((i) => d.temperature_2m_min[i]).filter(has));
+  const weekHi = Math.max(...shown.map((i) => d.temperature_2m_max[i]).filter(has));
   const pos = (t) => ((t - weekLo) / (weekHi - weekLo || 1)) * 100;
-  const sunsetPassed = c.time > d.sunset[0];
+  const todays = (values) => first === -1 ? null : values[first];
+  const asOf = whenOf(c.time, today);
   // paintTime redraws this clock every second, so a zone it can't use would stop the clock
   const tz = validTz(w.timezone) ? w.timezone : "";
 
-  const days = d.time.map((day, i) => {
-    const lo = d.temperature_2m_min[i], hi = d.temperature_2m_max[i], mm = d.precipitation_sum[i];
+  const days = shown.map((i) => {
+    const day = d.time[i], lo = d.temperature_2m_min[i], hi = d.temperature_2m_max[i], mm = d.precipitation_sum[i];
     const date = new Date(day + "T12:00");
-    const label = i === 0 ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
+    const label = i === first ? "Today" : date.toLocaleDateString("en-US", { weekday: "short" });
     const cond = describe(d.weather_code[i]);
-    const dot = i === 0 && has(c.temperature_2m) ? `<em style="left:${pos(c.temperature_2m)}%"></em>` : "";
+    // Stale conditions aren't today's temperature
+    const dot = i === first && !stale && has(c.temperature_2m) ? `<em style="left:${pos(c.temperature_2m)}%"></em>` : "";
     const range = has(lo) && has(hi) ? `<i style="left:${pos(lo)}%;width:${pos(hi) - pos(lo)}%"></i>` : "";
     return `<li>
       <span class="day">${label}</span>
@@ -621,11 +656,12 @@ function renderCity(el, city, w, air) {
       <span class="bar">${range}${dot}</span>
       <span class="hi">${deg(hi)}</span>
     </li>`;
-  }).join("");
+  }).join("") || `<li class="muted">The saved forecast has ended</li>`;
 
   const sun = sunsetPassed
-    ? `${icon("sunrise")}<div><p>Sunrise</p><h4>${clockOf(d.sunrise[1])}</h4></div>`
-    : `${icon("sunset")}<div><p>Sunset</p><h4>${clockOf(d.sunset[0])}</h4></div>`;
+    ? `${icon("sunrise")}<div><p>Sunrise</p><h4>${clockOf(d.sunrise[first + 1])}</h4></div>`
+    : `${icon("sunset")}<div><p>Sunset</p><h4>${clockOf(todays(d.sunset))}</h4></div>`;
+  const rain = todays(d.precipitation_probability_max);
 
   el.innerHTML = `
     <div class="panel">
@@ -636,28 +672,31 @@ function renderCity(el, city, w, air) {
         <div class="hero-meta">
           <h4>${now.text}</h4>
           <p>Feels like ${deg(c.apparent_temperature)}</p>
-          <p>H ${deg(d.temperature_2m_max[0])} · L ${deg(d.temperature_2m_min[0])}</p>
+          <p>H ${deg(todays(d.temperature_2m_max))} · L ${deg(todays(d.temperature_2m_min))}</p>
+          ${stale ? `<p class="stale">As of ${asOf}</p>` : ""}
         </div>
       </div>
       <div class="stats">
         <div class="card">${icon("wind")}<div><p>Wind</p><h4>${fixed(c.wind_speed_10m, "m/s")} ${compass(c.wind_direction_10m)}</h4></div></div>
-        <div class="card">${icon("umbrella")}<div><p>Rain today</p><h4>${fixed(d.precipitation_sum[0], "mm")} · ${d.precipitation_probability_max[0] ?? 0}%</h4></div></div>
+        <div class="card">${icon("umbrella")}<div><p>Rain today</p><h4>${fixed(todays(d.precipitation_sum), "mm")}${first === -1 ? "" : ` · ${rain ?? 0}%`}</h4></div></div>
         <div class="card">${icon("droplet")}<div><p>Humidity</p><h4>${has(c.relative_humidity_2m) ? `${c.relative_humidity_2m}%` : "–"}</h4></div></div>
-        ${airCards(air)}
+        ${airCards(air, cityNow)}
         <div class="card">${sun}</div>
       </div>
-      <h6 class="section">7-day forecast</h6>
+      <h6 class="section">${shown.length ? `${shown.length}-day forecast` : "Forecast"}</h6>
       <ol class="week">${days}</ol>
-      <div class="p-foot"><a href="https://open-meteo.com/">Weather data by Open-Meteo</a><p>Updated ${clockOf(c.time)}</p></div>
+      <div class="p-foot"><a href="https://open-meteo.com/">Weather data by Open-Meteo</a><p>Updated ${asOf}</p></div>
     </div>
-    <button class="button pill" type="button" aria-expanded="${el.classList.contains("open")}">
-      ${icon(now.icon)}<strong>${deg(c.temperature_2m)}</strong>${esc(city.name)}
+    <button class="button pill${stale ? " stale" : ""}" type="button" aria-expanded="${el.classList.contains("open")}"${stale ? ` title="As of ${esc(asOf)}"` : ""}>
+      ${icon(now.icon)}<strong>${deg(c.temperature_2m)}</strong><span class="name" title="${esc(city.name)}">${esc(city.name)}</span>
     </button>`;
+  return key;
 }
 
-function airCards(air) {
+// Left out when the saved copy is too old to say much about now
+function airCards(air, now) {
   const aqi = air?.current?.european_aqi;
-  if (aqi == null) return "";
+  if (aqi == null || isStale(now, air.current.time)) return "";
   const pollen = topPollen(air.current);
   return `<div class="card">${icon("leaf")}<div><p>Air quality · ${Math.round(aqi)}</p><h4>${aqiLabel(aqi)}</h4></div></div>
         ${pollen ? `<div class="card">${icon("flower")}<div><p>Pollen${pollen.v >= 1 ? ` · ${pollen.name}` : ""}</p><h4>${pollenLevel(pollen.v)}</h4></div></div>` : ""}`;
@@ -690,7 +729,7 @@ function buildWeather() {
     if (!city) return [];
     const el = document.createElement("div");
     el.className = "wx" + (i === 1 ? " end" : "");
-    el.innerHTML = `<button class="button pill" type="button">${esc(city.name)}</button>`;
+    el.innerHTML = `<button class="button pill" type="button"><span class="name" title="${esc(city.name)}">${esc(city.name)}</span></button>`;
     bindPanel(el);
     return [{ city, el }];
   });
@@ -712,17 +751,26 @@ async function loadWeather() {
     // Air quality is a nice-to-have, so the forecast shows without it, and doesn't wait long for it
     const [data, air] = await Promise.all([getCached(urls[0], 15_000), getCached(urls[1], 5_000).catch(() => [])]);
     if (seq !== weatherSeq) return;
-    list.forEach(({ city, el }, i) => renderCity(el, city, data[i], air[i]));
+    list.forEach((card, i) => {
+      Object.assign(card, { w: data[i], air: air[i] });
+      card.key = renderCity(card.el, card.city, card.w, card.air);
+    });
   } catch (err) {
     if (seq !== weatherSeq) return;
-    list.forEach(({ city, el }) => {
-      el.querySelector(".pill").textContent = `${city.name}: weather unavailable`;
+    list.forEach((card) => {
+      card.w = null;
+      card.el.querySelector(".pill").innerHTML = `<span class="name" title="${esc(card.city.name)}">${esc(card.city.name)}: weather unavailable</span>`;
     });
   }
+}
+// Midnight, sunset and the conditions going stale change the card between loads
+function refreshWeather() {
+  for (const card of cards) if (card.w && weatherNow(card.w).key !== card.key) card.key = renderCity(card.el, card.city, card.w, card.air);
 }
 buildWeather();
 loadWeather();
 setInterval(loadWeather, WEATHER_TTL);
+setInterval(refreshWeather, 30_000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) loadWeather(); });
 
 /* ---------- the dock ---------- */
@@ -909,39 +957,45 @@ activity.querySelector(".seg").addEventListener("click", (e) => {
   renderActivity();
 });
 
-// Visits summed per local day, kept in localStorage and topped up with what's new since
-// "until": { v, built, until, plain: { site: bool }, days: { "YYYY-MM-DD": { n, hours: [24], how: [HOW], sites: { site: n } } } }
-// A site is the host and port, without www. "plain" is true for sites only visited over
-// http, so their links don't send them to https.
+// Visits summed per local day, kept in chrome.storage.local as "activity" and topped up
+// with what's new since "until":
+// { v, built, removed, until, origins: { site: origin }, days: { "YYYY-MM-DD": { n, hours: [24], how: [HOW], sites: { site: n } } } }
+// A site is the host and port, without www. "origins" holds an origin actually visited for
+// each, like https://www.example.com or http://localhost:8080, for its link. https wins.
+// "removed" is the "historyRemoved" stamp it was built after. background.js removes the
+// cache whenever history is deleted, even with no new tab open, and a cache built before
+// the latest stamp is never used or kept.
+const ACTIVITY_VERSION = 3;
 let activityData = null, activityLoading = null, activityStale = false;
-// A tab coming back tops up at most this often, unless history was deleted meanwhile
+// A tab coming back tops up at most this often, unless history was deleted meanwhile.
+// A cache newer than this is shown as it is, by a new tab too.
 const ACTIVITY_TOPUP = 60_000;
 
 // No prototype, so a host like "constructor" or "__proto__" is just a key
 const dict = (o) => Object.assign(Object.create(null), o);
 
-// background.js stamps "historyRemoved" when history is deleted, even with no new tab open.
-// A cache built before that is thrown away.
+const removedStamp = async () => (await chrome.storage.local.get("historyRemoved")).historyRemoved ?? 0;
+
 async function buildActivity() {
   const now = Date.now();
-  const { historyRemoved = 0 } = await chrome.storage.local.get("historyRemoved");
   // Another tab may have just built it, while this one waited for the lock
-  let data = store.get("activity");
-  if (data?.v !== 2 || now - data.built > ACTIVITY_REBUILD || data.built < historyRemoved) {
+  let { activity: data, historyRemoved = 0 } = await chrome.storage.local.get(["activity", "historyRemoved"]);
+  const reuse = data?.v === ACTIVITY_VERSION && data.removed === historyRemoved && data.built <= now && now - data.built < ACTIVITY_REBUILD;
+  if (!reuse) {
     // A millisecond before midnight, as visits at "until" itself were counted last time
-    data = { v: 2, built: now, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime() - 1, plain: {}, days: {} };
+    data = { v: ACTIVITY_VERSION, built: now, removed: historyRemoved, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime() - 1, origins: {}, days: {} };
   }
-  data.plain = dict(data.plain);
+  data.origins = dict(data.origins);
   for (const d of Object.values(data.days)) d.sites = dict(d.sites);
+  if (reuse && data.until <= now && now - data.until < ACTIVITY_TOPUP) return data;
   // Every page visited since, then each one's visits. Reloads aren't new visits.
   const pages = await chrome.history.search({ text: "", startTime: data.until, endTime: now, maxResults: 1_000_000 });
   for (let i = 0; i < pages.length; i += 200) {
     const batch = pages.slice(i, i + 200).filter((p) => /^https?:/i.test(p.url));
     const visits = await Promise.all(batch.map((p) => chrome.history.getVisits({ url: p.url })));
     batch.forEach((p, j) => {
-      const site = hostOf(p.url, true);
-      // https anywhere wins
-      data.plain[site] = /^http:/i.test(p.url) && data.plain[site] !== false;
+      const origin = new URL(p.url).origin, site = hostOf(origin, true);
+      if (!data.origins[site]?.startsWith("https:")) data.origins[site] = origin;
       for (const v of visits[j]) {
         if (v.visitTime <= data.until || v.visitTime > now || v.transition === "reload") continue;
         const at = new Date(v.visitTime);
@@ -957,9 +1011,20 @@ async function buildActivity() {
   const oldest = daysAgo(ACTIVITY_DAYS - 1);
   for (const day in data.days) if (day < oldest) delete data.days[day];
   const seen = new Set(Object.values(data.days).flatMap((d) => Object.keys(d.sites)));
-  for (const site in data.plain) if (!seen.has(site)) delete data.plain[site];
-  store.set("activity", data);
-  return data;
+  for (const site in data.origins) if (!seen.has(site)) delete data.origins[site];
+  // History deleted while this was counting may be in it. The worker stamps a deletion
+  // before removing the cache, so a stamp read after saving also catches one in between.
+  if (await removedStamp() === data.removed) {
+    try {
+      await chrome.storage.local.set({ activity: data });
+    } catch (err) {
+      // Too big or storage failing: shown anyway, and rebuilt by the next tab
+      console.warn(`Couldn't save "activity":`, err);
+    }
+    if (await removedStamp() === data.removed) return data;
+    await chrome.storage.local.remove("activity").catch(() => {});
+  }
+  return buildActivity();
 }
 
 function loadActivity() {
@@ -984,7 +1049,7 @@ function historyRemoved() {
 // A load already running may have counted deleted visits, so another one follows it
 const reloadActivity = () => (activityLoading ?? Promise.resolve()).then(loadActivity);
 
-const siteUrl = (site) => `${activityData.plain[site] ? "http" : "https"}://${site}/`;
+const siteUrl = (site) => `${activityData.origins[site] ?? "https://" + site}/`;
 const hourLabel = (h) => settings.hour12 ? `${h % 12 || 12} ${h < 12 ? "AM" : "PM"}` : `${String(h).padStart(2, "0")}:00`;
 
 function renderActivity() {
@@ -1113,7 +1178,6 @@ if (!dockPending.size) showDock();
 /* ---------- settings (⌥ , or the gear) ---------- */
 const dialog = $("settings");
 $("settings-open").innerHTML = icon("settings");
-$("settings-close").innerHTML = icon("x");
 // ⌘O and ⌘, belong to the browser, so the page uses Option/Alt + comma
 const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌥ ," : "Alt + ,";
 $("shortcut").textContent = shortcut;
@@ -1127,7 +1191,6 @@ function openSettings() {
   shimmer.emphasize();
 }
 $("settings-open").addEventListener("click", openSettings);
-$("settings-close").addEventListener("click", () => dialog.close());
 // A click on the backdrop closes it
 dialog.addEventListener("click", (e) => {
   const r = dialog.getBoundingClientRect();

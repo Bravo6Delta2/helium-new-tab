@@ -216,7 +216,7 @@
   /* Above the corner pills and their panels only while it has suggestions to show */
   #search { position: relative; }
   #search:has(.suggest:not(:empty)) { z-index: 3; }
-  .weather, .dock { z-index: 2; }
+  .bottom { z-index: 2; }
   .suggest {
     position: absolute; left: 0; right: 0; top: calc(100% + 6px);
     margin: 0; padding: 4px;
@@ -256,19 +256,38 @@
   .button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
   .button[aria-expanded="true"] { box-shadow: 0 0 0 1px var(--primary) inset, 0 0 0 1px var(--primary); }
 
-  /* Weather: a pill per city in the bottom corners, each opens a forecast panel */
-  .weather {
+  /* The bottom row: a weather pill per city in the corners, each opening a forecast panel,
+     and the dock between them. Each has its own column, so a long name is cut short
+     rather than running under the dock. Every panel opens above the whole row, from its
+     side or the middle, so an open one never covers a pill. */
+  .bottom {
+    --row: 38px;
     position: fixed; left: 5vw; right: 5vw; bottom: 4vh;
-    display: flex; justify-content: space-between; align-items: flex-end;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); grid-template-areas: "left dock right";
+    align-items: end; gap: 10px 12px;
     pointer-events: none;
   }
-  .wx { position: relative; pointer-events: auto; }
-  .wx.end { margin-left: auto; }
+  .weather { display: contents; }
+  .weather > .wx { grid-area: left; justify-self: start; max-width: 100%; }
+  .weather > .wx.end { grid-area: right; justify-self: end; }
+  .wx { pointer-events: auto; }
+  .pill { max-width: 100%; }
+  /* A long city name is cut short, in full on hover */
+  .weather .pill { max-width: min(100%, 260px); }
+  /* The padding gives descenders room inside the clip, and the margin cancels it out */
+  .pill .name { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-block: 0.2em; margin-block: -0.2em; }
+  .pill.stale strong { color: var(--tertiary); }
+  /* Too narrow for all three: the dock goes above the weather pills */
+  @media (max-width: 800px) {
+    .bottom { --row: calc(38px + 10px + 38px); grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-areas: "dock dock" "left right"; }
+    .bottom:has(.weather:empty) { --row: 38px; grid-template-areas: "dock dock"; }
+    .dock { justify-self: center; }
+  }
   .panel {
     position: absolute; left: 0; bottom: calc(100% + 12px);
-    /* Within the window: 5vw each side, and above the pill (4vh + 38px + the 12px gap) */
+    /* Within the window: 5vw each side, and above the row (4vh + its height + the 12px gap) */
     width: min(384px, 90vw);
-    max-height: calc(96vh - 50px - 16px);
+    max-height: calc(96vh - var(--row) - 12px - 16px);
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 20px 20px 16px;
@@ -288,6 +307,10 @@
 
   .p-head, .p-foot { display: flex; justify-content: space-between; align-items: baseline; }
   .p-head h5:last-child { font-variant-numeric: tabular-nums; }
+  /* A long city name wraps, rather than pushing the clock out of the panel */
+  .p-head:not(:has(.seg)) { gap: 12px; }
+  .p-head h5:first-child { min-width: 0; overflow-wrap: anywhere; }
+  .p-head h5.muted { white-space: nowrap; }
   .p-foot { margin-top: 12px; }
   .p-foot a, .p-foot p { font-size: 12px; color: var(--tertiary); text-decoration: none; }
   .p-foot a:hover { text-decoration: underline; text-underline-offset: 4px; }
@@ -319,6 +342,7 @@
   .week .mm { color: var(--secondary); font-size: 12px; }
   .week .lo { color: var(--tertiary); text-align: right; }
   .week .hi { text-align: right; font-weight: 600; }
+  .week li.muted { display: block; line-height: 40px; }
   .bar { position: relative; height: 6px; border-radius: 3px; background: var(--helium-elevated-10); }
   .bar i { position: absolute; top: 0; bottom: 0; border-radius: 3px; background: linear-gradient(90deg, var(--bar-start), var(--bar-end)); }
   .bar em {
@@ -341,17 +365,17 @@
   .wc-time { font-size: 34px; font-weight: 450; letter-spacing: -0.03em; line-height: 1; font-variant-numeric: tabular-nums; }
   .wc p { font-size: 14px; }
 
-  /* Bottom centre: the uBlock pill and the settings gear */
+  /* Bottom centre: the activity and uBlock pills and the settings gear */
   .dock {
-    position: fixed; left: 50%; bottom: 4vh; translate: -50% 0;
+    grid-area: dock;
     display: flex; align-items: flex-end; gap: 8px;
+    pointer-events: auto;
     /* Shown by app.js once the pills have their numbers */
     opacity: 0; visibility: hidden;
     transition: opacity 0.2s, visibility 0s linear 0.2s;
   }
   .dock.ready { opacity: 1; visibility: visible; transition-delay: 0s; }
-  /* Centred on the dock rather than the pill, so it stays inside a narrow window */
-  .wx.center { position: static; }
+  /* Centred on the window rather than the pill, so it stays inside a narrow one */
   .wx.center .panel { left: 50%; translate: -50% 0; transform-origin: bottom center; }
 
   /* Privacy report: blocked requests split into trackers, ads and other */
@@ -536,17 +560,18 @@
 </main>
 
 <section class="clocks" id="clocks" aria-label="World clock"></section>
-<section class="weather" id="weather"></section>
-<div class="dock">
-  <div class="wx center" id="activity" hidden></div>
-  <div class="wx center" id="ublock" hidden></div>
-  <button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
+<div class="bottom">
+  <section class="weather" id="weather"></section>
+  <div class="dock">
+    <div class="wx center" id="activity" hidden></div>
+    <div class="wx center" id="ublock" hidden></div>
+    <button class="button settings-btn" id="settings-open" type="button" aria-label="Settings"></button>
+  </div>
 </div>
 
 <dialog class="settings" id="settings" aria-labelledby="settings-title">
   <div class="s-head">
     <h4 id="settings-title">Settings</h4>
-    <button class="icon-btn" id="settings-close" type="button" aria-label="Close"></button>
   </div>
   <h6 class="section">General</h6>
   <div class="prefs">

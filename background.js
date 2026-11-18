@@ -21,7 +21,8 @@ const KINDS = ["trackers", "ads", "other"];
 
 // Storage: "start" is the day counting began, and each day has its own "day:YYYY-MM-DD" key
 // holding { trackers, ads, other, sources }. Only today changes. The page shows up to 90 days.
-// "historyRemoved" is when history was last deleted, for the page's browsing activity.
+// "historyRemoved" is when history was last deleted, and "activity" the page's browsing
+// activity cache (see app.js), which the worker drops whenever history is deleted.
 // "trackerList" is { at, names: [company], index: { domain: companyIndex * 3 + kind } }, with
 // kind in KINDS order. A plain object of numbers parses about twice as fast as domain/company
 // pairs, and each name is stored once.
@@ -41,9 +42,10 @@ const init = () => ready ??= load().catch((err) => { ready = null; throw err; })
 async function load() {
   const got = await chrome.storage.local.get(["start", "trackerList", "historyRemoved"]);
   // No start means a fresh install, or data from an earlier version: start clean, but keep
-  // the page's note of deleted history, and the tracker list (an old one is replaced below)
+  // the page's activity cache and note of deleted history, and the tracker list (an old
+  // one is replaced below)
   if (!got.start) {
-    const keep = ["historyRemoved", "trackerList"];
+    const keep = ["activity", "historyRemoved", "trackerList"];
     await chrome.storage.local.remove((await chrome.storage.local.getKeys()).filter((k) => !keep.includes(k)));
     await chrome.storage.local.set({ start: today() });
   }
@@ -56,19 +58,18 @@ async function load() {
 
 // A day not touched since the worker started is read from storage first, so its counts
 // add to what's saved rather than replace it. That's also the case when the clock goes
-// back to a day already counted.
+// back to a day already counted. A failed read is forgotten, so the next block tries again.
 const loading = {};
 function dayEntry(day) {
   if (days[day]) return days[day];
   return loading[day] ??= chrome.storage.local.get("day:" + day).then((got) => {
-    delete loading[day];
     const saved = got["day:" + day];
-    if (!saved) prune();
+    if (!saved) prune().catch(() => {});
     // No prototype, so a source like "constructor" is just a name
     return days[day] ??= saved
       ? { ...saved, sources: Object.assign(Object.create(null), saved.sources) }
       : { trackers: 0, ads: 0, other: 0, sources: Object.create(null) };
-  });
+  }).finally(() => { delete loading[day]; });
 }
 
 // Drops days past KEEP_DAYS, when a day's first block is counted
@@ -124,9 +125,28 @@ function baseDomain(host) {
   return parts.slice(-n).join(".");
 }
 
+// Allowed in incognito, the worker also sees incognito tabs' requests, which aren't counted.
+// webRequest doesn't say which those are, so a tab is looked up once (its incognito flag
+// needs no "tabs" permission) and remembered, as a tab never changes window type. Not
+// allowed, which is the default, nothing is looked up. A tab that can't be looked up, like
+// one already closed, isn't counted either.
+let incognitoAllowed = null;
+const incognitoTabs = new Map(); // tabId -> Promise<boolean>
+async function isIncognito(tabId) {
+  if (!await (incognitoAllowed ??= chrome.extension.isAllowedIncognitoAccess().catch(() => true))) return false;
+  let known = incognitoTabs.get(tabId);
+  if (!known) {
+    incognitoTabs.set(tabId, known = chrome.tabs.get(tabId).then((tab) => tab.incognito !== false));
+    // Forgotten when the lookup fails, as a tab can be looked up before it's ready
+    known.catch(() => incognitoTabs.delete(tabId));
+  }
+  return known;
+}
+
 async function countBlocked(details) {
   // Requests from tabs only, not from extensions (this page's weather, for one)
   if (details.tabId < 0) return;
+  if (await isIncognito(details.tabId)) return;
   await init();
   const [kind, name] = classify(new URL(details.url).hostname);
   const day = today();
@@ -165,12 +185,19 @@ const filter = {
 // A redirect can't be filtered by where it goes, only by type: these are the ones uBO has
 // stand-ins for (noop.js, 1x1.gif, noop.html, noop.txt, noop.css, noop.mp3 and the like).
 const STAND_IN_TYPES = ["script", "image", "sub_frame", "xmlhttprequest", "stylesheet", "media", "object", "other"];
-chrome.webRequest.onErrorOccurred.addListener((d) => { if (d.error === BLOCKED) countBlocked(d); }, filter);
-chrome.webRequest.onBeforeRedirect.addListener((d) => { if (STAND_IN.test(d.redirectUrl)) countBlocked(d); },
+// A block that can't be counted (storage failing, an unknown tab) is dropped.
+const count = (d) => { countBlocked(d).catch(() => {}); };
+chrome.webRequest.onErrorOccurred.addListener((d) => { if (d.error === BLOCKED) count(d); }, filter);
+chrome.webRequest.onBeforeRedirect.addListener((d) => { if (STAND_IN.test(d.redirectUrl)) count(d); },
   { ...filter, types: filter.types.filter((t) => STAND_IN_TYPES.includes(t)) });
 
-// Deleting history wakes the worker even with no new tab open. The page rebuilds its
-// browsing activity when history was deleted after it was built.
-chrome.history.onVisitRemoved.addListener(() => {
-  chrome.storage.local.set({ historyRemoved: Date.now() });
+// Deleting any history wakes the worker, even with no new tab open, and the page's
+// activity cache goes with it, as it holds the sites visited. The stamp comes first: a tab
+// saving a cache it built from older history checks it after saving, and removes its copy.
+// Each deletion gets a new stamp, even two in the same millisecond.
+let lastRemoved = 0;
+chrome.history.onVisitRemoved.addListener(async () => {
+  lastRemoved = Math.max(Date.now(), lastRemoved + 1);
+  await chrome.storage.local.set({ historyRemoved: lastRemoved }).catch(() => {});
+  await chrome.storage.local.remove("activity").catch(() => {});
 });
