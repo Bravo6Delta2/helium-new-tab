@@ -5,9 +5,10 @@ A new tab page for [Helium](https://helium.computer) and other Chromium browsers
 ## Features
 
 - **Clock** in 24-hour or 12-hour time, over Prism's animated gradient shimmer.
-- **Search** with your choice of engine (Google, DuckDuckGo, Brave, Bing, Kagi, Startpage, Ecosia):
-  - **Bangs** like `!yt lofi` or `lofi !yt`, from the same list Helium's address bar uses. Bangs that list doesn't have are passed to DuckDuckGo.
-  - **Suggestions** for bangs as you type them, and for pages from your history and bookmarks.
+- **Search** with your choice of engine (Google, DuckDuckGo, Brave, Bing, Kagi, Startpage, Ecosia, or your own):
+  - **Bangs** like `!yt lofi` or `lofi !yt`, from the same list Helium's address bar uses, plus your own. Bangs that list doesn't have are passed to DuckDuckGo.
+  - **Suggestions** for bangs as you type them, and for open tabs and pages from your history and bookmarks.
+  - **Switch to tab**: picking a page that's already open goes to its tab and closes the new tab, like the address bar. <kbd>⌘</kbd>/<kbd>Ctrl</kbd> opens it again in a new tab instead.
   - URLs, `localhost:3000` and `chrome://` pages open directly.
   - Typing anywhere on the page goes into the search box.
 - **Weather** for up to two cities, from [Open-Meteo](https://open-meteo.com): current conditions, a weekly forecast, sunrise and sunset, air quality, and pollen (pollen is only available for Europe). The last forecast is kept for when you're offline.
@@ -28,15 +29,17 @@ The uBlock Origin stats need [uBlock Origin](https://github.com/gorhill/uBlock) 
 
 Open Settings with the gear button or <kbd>⌥</kbd> <kbd>,</kbd> (<kbd>Alt</kbd> <kbd>,</kbd> on Windows and Linux) to choose:
 
-- the search engine
 - 24-hour or 12-hour time
 - Celsius or Fahrenheit
 - the cities for the weather cards and world clocks
+- the search engine, under **Search**
+
+**Search** also adds your own search engines and bangs. Give each a web address with `%s` where the search terms go, like `https://claude.ai/new?q=%s` for `!cl`. A bang without `%s` always opens the same page. Click one to edit it.
 
 Anything else is set in the `CONFIG` object at the top of [`app.js`](app.js), including:
 
-- **Search engines.** Add your own as `Name: "https://example.com/search?q=%s"`.
-- **Your own bangs.** These take priority over Helium's list:
+- **Built-in search engines.** Add more as `Name: "https://example.com/search?q=%s"`.
+- **Default bangs.** These take priority over Helium's list, and ones added in Settings take priority over these:
   ```js
   bangs: {
     cl: ["Claude", "https://claude.ai/new?q=%s"],
@@ -68,6 +71,7 @@ Browsing activity is read from the browser's own history and cleared when you de
 | --- | --- |
 | `history` | Browsing activity and search suggestions |
 | `bookmarks` | Search suggestions |
+| `tabs` | Suggesting open tabs and switching to them |
 | `favicon` | Site icons in suggestions and activity |
 | `storage` | Settings, cached forecasts and stats |
 | `webRequest` and `<all_urls>` | Seeing which requests uBlock Origin blocks. Nothing is changed or blocked by this extension. |

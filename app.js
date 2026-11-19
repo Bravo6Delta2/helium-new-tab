@@ -1,5 +1,6 @@
 // Defaults. Time format, temperature unit, search engine and cities can be changed in
-// Settings (⌥ ,), and what's picked there wins over these.
+// Settings (⌥ ,), and what's picked there wins over these. Settings can also add search
+// engines and bangs to the ones here.
 const CONFIG = {
   hour12: false,
   fahrenheit: false,
@@ -21,7 +22,7 @@ const CONFIG = {
     bangList: "https://services.helium.imput.net/bangs.json",
     unknownBang: "https://duckduckgo.com/?q=%s",
   },
-  // Your own bangs. These win over Helium's list, e.g.
+  // Your own bangs. These win over Helium's list, and ones added in Settings win over these, e.g.
   // cl: ["Claude", "https://claude.ai/new?q=%s"],
   bangs: {
   },
@@ -57,18 +58,27 @@ const validTz = (tz) => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; }
 };
 
+// The engines in CONFIG, then yours from Settings
+const allEngines = (s = settings) =>
+  ({ ...CONFIG.search.engines, ...Object.fromEntries(s.engines.map((e) => [e.name, e.url])) });
+
 // Two slots each, left and right. Once saved, these win over CONFIG.
 const SLOTS = ["Left", "Right"];
 function readSettings() {
   const s = {
     weather: CONFIG.cities, clocks: CONFIG.clocks,
     hour12: CONFIG.hour12, fahrenheit: CONFIG.fahrenheit, engine: CONFIG.search.engine,
+    engines: [], bangs: [],
     ...store.get("settings"),
   };
   for (const k of ["weather", "clocks"]) s[k] = SLOTS.map((_, i) => s[k]?.[i] || null);
   s.clocks = s.clocks.map((c) => c && validTz(c.tz) ? c : null);
-  // An engine since removed from CONFIG falls back to the first one
-  if (!Object.hasOwn(CONFIG.search.engines, s.engine)) s.engine = Object.keys(CONFIG.search.engines)[0];
+  // Your own engines ({ name, url }) and bangs ({ t, name, url }). Anything malformed is dropped.
+  const str = (v) => typeof v === "string" && v !== "";
+  s.engines = (Array.isArray(s.engines) ? s.engines : []).filter((e) => str(e?.name) && str(e.url));
+  s.bangs = (Array.isArray(s.bangs) ? s.bangs : []).filter((b) => str(b?.t) && str(b.url) && typeof b.name === "string");
+  // An engine since removed falls back to the first one
+  if (!Object.hasOwn(allEngines(s), s.engine)) s.engine = Object.keys(CONFIG.search.engines)[0];
   return s;
 }
 const settings = readSettings();
@@ -231,12 +241,18 @@ function loadHeliumBangs() {
   return bangsLoading;
 }
 
-// Own properties only, so "!constructor" isn't Object's
-const ownBang = (key) => Object.hasOwn(CONFIG.bangs, key) ? CONFIG.bangs[key] : null;
+// [name, url template]. Bangs from Settings win over CONFIG's. Own properties only, so
+// "!constructor" isn't Object's.
+function ownBang(key) {
+  const b = settings.bangs.find((b) => b.t === key);
+  if (b) return [b.name, b.url];
+  return Object.hasOwn(CONFIG.bangs, key) ? CONFIG.bangs[key] : null;
+}
 
 function lookupBang(key) {
   const own = ownBang(key);
-  if (own) return { s: own[0], u: own[1].replaceAll("%s", "{searchTerms}") };
+  // One without %s always opens that page, as is
+  if (own) return { s: own[0], u: own[1].replaceAll("%s", "{searchTerms}"), f: own[1].includes("%s") ? undefined : 0 };
   return heliumBangs?.get(key) || null;
 }
 
@@ -272,7 +288,7 @@ function resolve(raw) {
     // Local servers and routers rarely have certificates
     return (/^(localhost|\d{1,3}(\.\d{1,3}){3})\b/i.test(text) ? "http://" : "https://") + text;
   }
-  return fill(CONFIG.search.engines[settings.engine], text);
+  return fill(allEngines()[settings.engine], text);
 }
 
 function updateBangHint() {
@@ -298,6 +314,18 @@ function go(url, newTab) {
     else chrome.tabs.update({ url });
   } else if (newTab) window.open(url, "_blank");
   else location.href = url;
+}
+
+// Like the address bar's "Switch to tab". This new tab closes, unless it has been used to
+// go somewhere and has a back button to keep.
+async function switchTab(tab) {
+  try {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+  } catch {
+    return go(tab.url); // closed since it was suggested
+  }
+  if (history.length <= 1) chrome.tabs.getCurrent().then((t) => t && chrome.tabs.remove(t.id)).catch(() => {});
 }
 
 q.addEventListener("keydown", async (e) => {
@@ -332,7 +360,7 @@ q.addEventListener("keydown", async (e) => {
 });
 
 /* ---------- suggestions ---------- */
-// Bangs while one is being typed, otherwise pages from history and bookmarks.
+// Bangs while one is being typed, otherwise open tabs and pages from history and bookmarks.
 // Nothing is picked until an arrow key says so, so Enter still searches what was typed.
 const suggest = $("suggest");
 const SUGGEST_MAX = 6;
@@ -348,9 +376,10 @@ function caretBang() {
 // Bangs with a trigger starting with prefix. Kagi's list has no popularity, so an exact
 // match comes first, then shorter triggers, then bangs with more aliases (YouTube has 9).
 function matchBangs(prefix) {
-  const own = Object.entries(CONFIG.bangs)
-    .filter(([t]) => t.startsWith(prefix))
-    .map(([t, [s, u]]) => ({ t, s, u, n: Infinity }));
+  // Settings' before CONFIG's, so the first of a trigger is the one used
+  const own = [...settings.bangs.map((b) => [b.t, b.name, b.url]), ...Object.entries(CONFIG.bangs).map(([t, [s, u]]) => [t, s, u])]
+    .filter(([t], i, all) => t.startsWith(prefix) && all.findIndex(([x]) => x === t) === i)
+    .map(([t, s, u]) => ({ t, s, u, n: Infinity }));
   const found = [];
   for (const b of heliumBangList) {
     let t = null;
@@ -364,19 +393,31 @@ function matchBangs(prefix) {
     .map((b) => ({ bang: b.t, title: b.s, url: b.u.replace(/\{searchTerms\}|%s/g, "") }));
 }
 
-// Result pages of the engines in Settings, which would crowd out the pages themselves
-const isSearchPage = (url) => Object.values(CONFIG.search.engines).some((e) => url.startsWith(e.slice(0, e.indexOf("%s"))));
+// Result pages of the engines in Settings, which would crowd out the pages themselves.
+// One like "https://%s.example.com" has no prefix to tell its pages by.
+const isSearchPage = (url) => Object.values(allEngines()).some((e) => {
+  const prefix = e.slice(0, e.indexOf("%s"));
+  return URL.canParse(prefix) && url.startsWith(prefix);
+});
 // The host without www, and with the port if asked
 const hostOf = (url, port = false) => {
   try { const u = new URL(url); return (port ? u.host : u.hostname).replace(/^www\./, ""); } catch { return ""; }
 };
 const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+// Tabs in every window but this one, leaving out other new tabs and incognito ones
+async function openTabs() {
+  const [tabs, self] = await Promise.all([chrome.tabs.query({}), chrome.tabs.getCurrent()]);
+  return tabs.filter((t) => t.id !== self?.id && !t.incognito && t.url && !/^chrome:\/\/new-?tab\b/i.test(t.url));
+}
+
 async function matchPages(text) {
-  const [visits, marks] = await Promise.all([
+  const [visits, marks, tabs] = await Promise.all([
     chrome.history.search({ text, startTime: 0, maxResults: 100 }),
     chrome.bookmarks ? chrome.bookmarks.search(text).catch(() => []) : [],
+    openTabs().catch(() => []),
   ]);
+  const words = text.toLowerCase().split(/\s+/);
   const byUrl = new Map();
   for (const h of visits) byUrl.set(h.url, { url: h.url, title: h.title, weight: h.typedCount * 3 + h.visitCount });
   for (const b of marks) {
@@ -384,14 +425,24 @@ async function matchPages(text) {
     const page = byUrl.get(b.url) ?? { url: b.url, weight: 0 };
     byUrl.set(b.url, { ...page, title: b.title || page.title, bookmark: true });
   }
-  // Pages whose site starts with what was typed first, then a word in the title
-  const first = text.toLowerCase().split(/\s+/)[0];
+  // A page that's open switches to its tab. Tabs with every typed word in their title or
+  // address are added, as history may not have them (yet).
+  for (const t of tabs) {
+    const page = byUrl.get(t.url);
+    if (page) page.tab ??= t;
+    else if (words.every((w) => `${t.title} ${t.url}`.toLowerCase().includes(w))) {
+      byUrl.set(t.url, { url: t.url, title: t.title, weight: 0, tab: t });
+    }
+  }
+  // Pages whose site starts with what was typed first, then a word in the title.
+  // Within each, open tabs, then bookmarks, then the most visited.
+  const first = words[0];
   const word = new RegExp("(^|\\W)" + reEscape(first), "i");
   const tier = (p) => hostOf(p.url).startsWith(first) ? 0 : word.test(p.title) ? 1 : 2;
   return [...byUrl.values()]
     .filter((p) => !/^(javascript|chrome-extension):/i.test(p.url) && !isSearchPage(p.url))
     .map((p) => ({ ...p, tier: tier(p) }))
-    .sort((a, b) => a.tier - b.tier || (b.bookmark ?? 0) - (a.bookmark ?? 0) || b.weight - a.weight)
+    .sort((a, b) => a.tier - b.tier || !!b.tab - !!a.tab || (b.bookmark ?? 0) - (a.bookmark ?? 0) || b.weight - a.weight)
     .slice(0, SUGGEST_MAX);
 }
 
@@ -440,7 +491,8 @@ function paintSuggestions() {
     <li role="option" id="sg-${i}" data-i="${i}" class="${i === active ? "active" : ""}" aria-selected="${i === active}">
       ${favicon(r.url)}
       <span class="txt"><span class="title">${mark(r.title || prettyUrl(r.url), words)}</span><small>${esc(r.bang ? hostOf(r.url) : prettyUrl(r.url))}</small></span>
-      ${r.bang ? `<span class="tag">!${esc(r.bang)}</span>` : r.bookmark ? `<span class="mark" title="Bookmark">${icon("bookmark", 16)}</span>` : ""}
+      ${r.bang ? `<span class="tag">!${esc(r.bang)}</span>` : r.tab ? `<span class="tag">Switch to tab</span>`
+        : r.bookmark ? `<span class="mark" title="Bookmark">${icon("bookmark", 16)}</span>` : ""}
     </li>`).join("");
   q.setAttribute("aria-expanded", rows.length > 0);
   if (rows.length) closePanels();
@@ -448,7 +500,9 @@ function paintSuggestions() {
   else q.removeAttribute("aria-activedescendant");
 }
 
+// ⌘ or Ctrl opens an open tab's page again in a new one, instead of switching to it
 function pick(row, newTab) {
+  if (row.tab && !newTab) return switchTab(row.tab);
   if (!row.bang) return go(row.url, newTab);
   // Swap the half-typed bang for the whole one, ready for the search terms
   const token = caretBang();
@@ -1187,6 +1241,7 @@ function openSettings() {
   closePanels();
   renderGeneral();
   renderSlots();
+  renderSearch();
   dialog.showModal();
   shimmer.emphasize();
 }
@@ -1212,7 +1267,7 @@ window.addEventListener("storage", (e) => {
   const changed = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(settings[k]));
   Object.assign(settings, next);
   for (const kind of changed) applySettings(kind);
-  if (changed.length && dialog.open) { renderGeneral(); renderSlots(); }
+  if (changed.length && dialog.open) { renderGeneral(); renderSlots(); renderSearch(); }
 });
 
 function saveSettings(kind) {
@@ -1224,13 +1279,22 @@ function applySettings(kind) {
   else if (kind === "clocks") renderClocks(new Date());
   else if (kind === "hour12") { paintTime(new Date()); loadWeather(); renderActivity(); }
   else if (kind === "fahrenheit") loadWeather();
+  else if (kind === "bangs") updateBangHint();
 }
 
-// Search engine, time format and temperature unit
-const engine = $("engine");
-engine.innerHTML = Object.keys(CONFIG.search.engines).map((name) => `<option>${esc(name)}</option>`).join("");
-$("engine-field").insertAdjacentHTML("beforeend", icon("chevron-down", 16));
-engine.addEventListener("change", () => { settings.engine = engine.value; saveSettings("engine"); });
+// General, or Search: the engine and your own engines and bangs
+const tabs = $("settings-tabs");
+function showTab(name) {
+  for (const b of tabs.children) b.setAttribute("aria-pressed", b.dataset.tab === name);
+  for (const pane of dialog.querySelectorAll("[data-pane]")) pane.hidden = pane.dataset.pane !== name;
+}
+tabs.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-tab]");
+  if (b) showTab(b.dataset.tab);
+});
+showTab("general");
+
+// Time format and temperature unit
 for (const seg of dialog.querySelectorAll(".seg[data-setting]")) {
   seg.addEventListener("click", (e) => {
     const b = e.target.closest("[data-value]");
@@ -1241,10 +1305,121 @@ for (const seg of dialog.querySelectorAll(".seg[data-setting]")) {
   });
 }
 function renderGeneral() {
-  engine.value = settings.engine;
   for (const seg of dialog.querySelectorAll(".seg[data-setting]")) {
     for (const b of seg.children) b.setAttribute("aria-pressed", b.dataset.value === String(settings[seg.dataset.setting]));
   }
+}
+
+// The search engine, and your own engines and bangs. Each list is edited with the form
+// under it: a row loads into the form, and saving one with the same name or trigger
+// replaces it.
+const engine = $("engine"), engineForm = $("engine-add"), bangForm = $("bang-add");
+$("engine-field").insertAdjacentHTML("beforeend", icon("chevron-down", 16));
+engine.addEventListener("change", () => { settings.engine = engine.value; saveSettings("engine"); });
+
+const entry = (i, key, name, url) => `
+  <li>
+    <button class="edit" type="button" data-i="${i}" title="Edit">
+      <span class="key">${esc(key)}</span><span class="txt">${name ? `<span>${esc(name)}</span>` : ""}<small>${esc(prettyUrl(url))}</small></span>
+    </button>
+    <button class="icon-btn" type="button" data-remove="${i}" aria-label="Remove ${esc(key)}">${icon("x", 16)}</button>
+  </li>`;
+
+function renderSearch() {
+  engine.innerHTML = Object.keys(allEngines()).map((name) => `<option>${esc(name)}</option>`).join("");
+  engine.value = settings.engine;
+  $("engines-list").innerHTML = settings.engines.map((e, i) => entry(i, e.name, "", e.url)).join("");
+  $("bangs-list").innerHTML = settings.bangs.map((b, i) => entry(i, "!" + b.t, b.name, b.url)).join("");
+  for (const form of [engineForm, bangForm]) labelSubmit(form);
+}
+
+// What's in the box is found where the browser's validation bubble points
+function invalid(input, message) {
+  input.setCustomValidity(message);
+  input.reportValidity();
+}
+// A web address with %s where the search terms go. A bang may leave it out, to always open
+// the same page.
+function templateError(url, needTerms) {
+  if (needTerms && !url.includes("%s")) return "Put %s where the search terms go";
+  try {
+    if (!/^(https?|chrome|file):$/.test(new URL(url.replaceAll("%s", "x")).protocol)) throw 0;
+  } catch {
+    return "Enter a web address, like https://example.com/search?q=%s";
+  }
+  return "";
+}
+
+// What a form's key field holds, and the saved entry it would replace
+const formKey = {
+  engines: (f) => f.elements.label.value.trim(),
+  bangs: (f) => f.elements.trigger.value.trim().replace(/^!/, "").toLowerCase(),
+};
+const matches = {
+  engines: (key) => (e) => e.name === key,
+  bangs: (key) => (b) => b.t === key,
+};
+// "Save" when it replaces one, "Add" otherwise
+function labelSubmit(form) {
+  const kind = form.dataset.kind;
+  form.querySelector("[type=submit]").textContent = settings[kind].some(matches[kind](formKey[kind](form))) ? "Save" : "Add";
+}
+
+function saveEntry(form, item) {
+  const kind = form.dataset.kind, list = settings[kind];
+  const i = list.findIndex(matches[kind](formKey[kind](form)));
+  if (i === -1) list.push(item);
+  else list[i] = item;
+  saveSettings(kind);
+  form.reset();
+  renderSearch();
+}
+
+engineForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const { label, url } = engineForm.elements;
+  const name = formKey.engines(engineForm), template = url.value.trim();
+  if (!name) return invalid(label, "Give it a name");
+  if (Object.hasOwn(CONFIG.search.engines, name)) return invalid(label, `${name} is already in the list`);
+  const err = templateError(template, true);
+  if (err) return invalid(url, err);
+  saveEntry(engineForm, { name, url: template });
+});
+bangForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const { trigger, label, url } = bangForm.elements;
+  const t = formKey.bangs(bangForm), template = url.value.trim();
+  if (!t || /\s/.test(t)) return invalid(trigger, "One word, like cl");
+  const err = templateError(template, false);
+  if (err) return invalid(url, err);
+  saveEntry(bangForm, { t, name: label.value.trim() || hostOf(template.replaceAll("%s", "x")), url: template });
+});
+
+for (const form of [engineForm, bangForm]) {
+  const kind = form.dataset.kind;
+  form.addEventListener("input", (e) => {
+    e.target.setCustomValidity("");
+    labelSubmit(form);
+  });
+  $(kind + "-list").addEventListener("click", (e) => {
+    const edit = e.target.closest("[data-i]"), remove = e.target.closest("[data-remove]");
+    if (remove) {
+      const [gone] = settings[kind].splice(remove.dataset.remove, 1);
+      // The engine in use falls back to the first one
+      if (kind === "engines" && gone.name === settings.engine) settings.engine = Object.keys(CONFIG.search.engines)[0];
+      saveSettings(kind);
+      renderSearch();
+    } else if (edit) {
+      const item = settings[kind][edit.dataset.i];
+      const { elements: f } = form;
+      if (kind === "engines") f.label.value = item.name;
+      else { f.trigger.value = item.t; f.label.value = item.name; }
+      f.url.value = item.url;
+      for (const input of form.querySelectorAll("input")) input.setCustomValidity("");
+      labelSubmit(form);
+      f.url.focus();
+    }
+  });
 }
 
 // Open-Meteo's geocoder, which also gives each city's time zone
