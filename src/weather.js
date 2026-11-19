@@ -3,10 +3,10 @@ import { html } from "./html.js";
 import { icon } from "./icons.js";
 import { bindPanel, closePanels } from "./panels.js";
 import { $, fmtTime, settings, store } from "./page.js";
-import { clockOf, validTz, whenOf } from "./time.js";
 import {
   airUrl, aqiLabel, compass, deg, describe, fixed, has, isStale, pollenLevel, topPollen, weatherNow, weatherUrl,
-} from "./weather-logic.js";
+} from "./forecast.js";
+import { clockOf, validTz, whenOf } from "./time.js";
 
 const WEATHER_TTL = 15 * 60_000;
 

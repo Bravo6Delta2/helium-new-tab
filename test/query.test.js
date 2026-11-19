@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  fill, findBang, FLAG, hostOf, isSearchPage, looksLikeUrl, matchBangs, ownBangEntry, parseBangList, resolve, runBang,
+  fill, findBang, FLAG, isSearchPage, looksLikeUrl, matchBangs, ownBangEntry, parseBangList, resolve, runBang,
 } from "../src/query.js";
+import { hostOf } from "../src/url.js";
 
 test("findBang finds a bang anywhere and keeps the rest as terms", () => {
   assert.deepEqual(findBang("!yt lofi"), { key: "yt", terms: "lofi" });
@@ -58,6 +59,9 @@ test("resolve picks a bang, an address or a search", () => {
   assert.equal(resolve("localhost:8080/x", ctx), "http://localhost:8080/x");
   assert.equal(resolve("ftp://files.example", ctx), "ftp://files.example");
   assert.equal(resolve("package.json", ctx), "https://search.example/?q=package.json");
+  // A bang whose address won't open with no terms falls through to an address or a search
+  const broken = { ...ctx, lookup: () => ({ u: "not a url {searchTerms}" }) };
+  assert.equal(resolve("!bad", broken), "https://search.example/?q=!bad");
 });
 
 test("parseBangList reads Helium's commented JSON with trailing commas", () => {

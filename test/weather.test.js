@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { aqiLabel, compass, describe, isStale, topPollen, weatherNow, weatherUrl } from "../src/weather-logic.js";
+import { aqiLabel, compass, describe, isStale, topPollen, weatherNow, weatherUrl } from "../src/forecast.js";
 
 // A forecast as Open-Meteo sends it, for a city in UTC+9 with no summer time
 const forecast = (over = {}) => ({
@@ -28,6 +28,14 @@ test("weatherNow notices sunset, and conditions going stale", () => {
   assert.equal(w.sunsetPassed, true);
   assert.equal(w.stale, true);
   assert.notEqual(w.key, weatherNow(forecast(), new Date("2026-11-18T01:30:00Z")).key);
+});
+
+test("the key changes when conditions go stale, before sunset", () => {
+  const fresh = weatherNow(forecast(), new Date("2026-11-18T01:30:00Z")); // 10:30 in Tokyo
+  const old = weatherNow(forecast(), new Date("2026-11-18T03:30:00Z")); // 12:30, two hours on
+  assert.equal(old.sunsetPassed, false);
+  assert.equal(old.stale, true);
+  assert.notEqual(fresh.key, old.key);
 });
 
 test("weatherNow uses the saved offset for a zone it doesn't know", () => {

@@ -48,5 +48,5 @@ window.addEventListener("storage", (e) => {
 // isn't waited for long.
 const DOCK_WAIT = 2000;
 const showDock = () => document.querySelector(".dock").classList.add("ready");
-Promise.all([initActivity(), initUblock()]).finally(showDock);
 setTimeout(showDock, DOCK_WAIT);
+Promise.all([initActivity(), initUblock()]).finally(showDock);

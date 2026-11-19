@@ -4,10 +4,9 @@ import { html } from "./html.js";
 import { icon } from "./icons.js";
 import { $, favicon, settings, shimmer } from "./page.js";
 import { closePanels } from "./panels.js";
-import {
-  findBang, hostOf, isSearchPage, matchBangs, ownBangEntry, parseBangList, prettyUrl, reEscape, resolve,
-} from "./query.js";
+import { findBang, isSearchPage, matchBangs, ownBangEntry, parseBangList, resolve } from "./query.js";
 import { allEngines, defaultEngine } from "./settings.js";
+import { hostOf, prettyUrl, reEscape } from "./url.js";
 
 const q = $("q"), suggest = $("suggest");
 
@@ -43,15 +42,11 @@ function loadHeliumBangs() {
   return bangsLoading;
 }
 
-// [name, url template]. Bangs from Settings win over CONFIG's. Own properties only, so
-// "!constructor" isn't Object's.
-function ownBang(key) {
-  const b = settings.bangs.find((b) => b.t === key);
-  if (b) return [b.name, b.url];
-  return Object.hasOwn(CONFIG.bangs, key) ? CONFIG.bangs[key] : null;
-}
-// Settings' before CONFIG's, so the first of a trigger is the one used
+// Your bangs as [trigger, name, url template]: Settings' before CONFIG's, so the first of a
+// trigger is the one used. Own properties only, so "!constructor" isn't Object's.
 const ownBangs = () => [...settings.bangs.map((b) => [b.t, b.name, b.url]), ...Object.entries(CONFIG.bangs).map(([t, [s, u]]) => [t, s, u])];
+// [name, url template]
+const ownBang = (key) => ownBangs().find(([t]) => t === key)?.slice(1) ?? null;
 
 function lookupBang(key) {
   const own = ownBang(key);

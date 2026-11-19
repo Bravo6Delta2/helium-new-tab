@@ -2,7 +2,8 @@
 // so the tests can run it.
 import { html } from "./html.js";
 
-// [id, label, days]. Both keep KEEP_DAYS (shared.js) days, the last period.
+// [id, label, days]. Both keep 90 days, the last period: background.js its KEEP_DAYS
+// (shared.js), and activity.js its ACTIVITY_DAYS.
 export const PERIODS = [["today", "Today", 1], ["7d", "7D", 7], ["30d", "30D", 30], ["90d", "90D", 90]];
 export const periodDays = (id) => PERIODS.find(([p]) => p === id)[2];
 // A saved period, or the default when it's missing or unknown

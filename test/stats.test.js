@@ -36,6 +36,17 @@ test("indexTrackers packs company and kind, and ads win over trackers", () => {
   assert.equal(list.index["cdn.com"], 2 * 3 + KINDS.indexOf("other"));
 });
 
+test("ads win over trackers whichever category comes first", () => {
+  const list = indexTrackers({
+    categories: {
+      Analytics: [{ TrackCo: { "https://trackco.example": ["both.com"] } }],
+      Advertising: [{ AdCo: { "https://adco.example": ["both.com"] } }],
+      Content: [{ CdnCo: { "https://cdn.example": ["both.com"] } }],
+    },
+  });
+  assert.deepEqual(classify("both.com", list), ["ads", "AdCo"]);
+});
+
 test("classify matches a domain's subdomains, and names others by their domain", () => {
   const list = indexTrackers(services);
   assert.deepEqual(classify("pixel.trackco.com", list), ["trackers", "TrackCo"]);

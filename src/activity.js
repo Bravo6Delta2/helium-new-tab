@@ -5,10 +5,10 @@ import { html } from "./html.js";
 import { icon } from "./icons.js";
 import { bindPanel } from "./panels.js";
 import { $, favicon, fmtTime, settings, store } from "./page.js";
-import { hostOf } from "./query.js";
 import { compact, count, periodDays, periodOr, reportShell } from "./report.js";
-import { dayOf, daysAgo, KEEP_DAYS } from "./shared.js";
+import { dayOf, daysAgo } from "./shared.js";
 import { fmtDay, hourLabel } from "./time.js";
+import { hostOf } from "./url.js";
 
 // [id, label]. "typed" is the address bar, typing or picking a suggestion. "other" also
 // holds redirects, start pages and form posts.
@@ -18,6 +18,8 @@ const howOf = (transition) =>
     : transition === "link" ? 1
     : transition === "auto_bookmark" ? 2
     : 3;
+// Chrome keeps 90 days of history
+const ACTIVITY_DAYS = 90;
 // Deleted history only shows up on a full rebuild, so one happens daily
 const ACTIVITY_REBUILD = 24 * 3600_000;
 // Days per bar, so each period has 7 to 15 bars. Today has 12 bars of two hours.
@@ -52,7 +54,7 @@ async function buildActivity() {
   const reuse = data?.v === ACTIVITY_VERSION && data.removed === historyRemoved && data.built <= now && now - data.built < ACTIVITY_REBUILD;
   if (!reuse) {
     // A millisecond before midnight, as visits at "until" itself were counted last time
-    data = { v: ACTIVITY_VERSION, built: now, removed: historyRemoved, until: new Date(daysAgo(KEEP_DAYS - 1) + "T00:00").getTime() - 1, origins: {}, days: {} };
+    data = { v: ACTIVITY_VERSION, built: now, removed: historyRemoved, until: new Date(daysAgo(ACTIVITY_DAYS - 1) + "T00:00").getTime() - 1, origins: {}, days: {} };
   }
   data.origins = dict(data.origins);
   for (const d of Object.values(data.days)) d.sites = dict(d.sites);
@@ -77,7 +79,7 @@ async function buildActivity() {
     });
   }
   data.until = now;
-  const oldest = daysAgo(KEEP_DAYS - 1);
+  const oldest = daysAgo(ACTIVITY_DAYS - 1);
   for (const day in data.days) if (day < oldest) delete data.days[day];
   const seen = new Set(Object.values(data.days).flatMap((d) => Object.keys(d.sites)));
   for (const site in data.origins) if (!seen.has(site)) delete data.origins[site];

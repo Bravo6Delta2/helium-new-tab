@@ -86,10 +86,10 @@ Browsing activity is read from the browser's own history and cleared when you de
 | `src/main.js` | Starts each part of the page, and passes on settings changes |
 | `src/config.js` | Defaults (see [Settings](#settings)) |
 | `src/clock.js`, `search.js`, `weather.js`, `activity.js`, `ublock.js`, `settings-dialog.js` | One part of the page each |
-| `src/query.js`, `settings.js`, `time.js`, `weather-logic.js`, `report.js`, `trackers.js` | The logic behind them, with no DOM or `chrome.*`, so the tests can run it |
+| `src/query.js`, `settings.js`, `time.js`, `forecast.js`, `report.js`, `trackers.js`, `url.js` | The logic behind them, with no DOM or `chrome.*`, so the tests can run it |
 | `src/shared.js` | What `background.js` stores and the page reads |
 | `src/page.js`, `panels.js`, `html.js`, `icons.js` | What the parts share: the live settings, panels, escaped templates and icons |
-| `test/` | Tests |
+| `test/`, `package.json` | Tests, and `package.json` only to tell Node the files are modules |
 | `fonts/` | Instrument Sans |
 | `icons/` | Icons |
 
@@ -97,7 +97,7 @@ Browsing activity is read from the browser's own history and cleared when you de
 
 There's no build step: the page and the worker are native ES modules, loaded as they are. Reload the extension at `chrome://extensions` after a change.
 
-Run the tests with Node 22.12 or later, no install needed:
+Run the tests with Node 22 or later, no install needed:
 
 ```sh
 node --test

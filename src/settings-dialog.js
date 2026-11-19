@@ -4,9 +4,9 @@ import { html } from "./html.js";
 import { icon } from "./icons.js";
 import { closePanels } from "./panels.js";
 import { $, settings, shimmer } from "./page.js";
-import { hostOf, prettyUrl } from "./query.js";
 import { defaultEngine, engineNames, SLOTS, templateError } from "./settings.js";
 import { validTz } from "./time.js";
+import { hostOf, prettyUrl } from "./url.js";
 
 const dialog = $("settings");
 // Called with what changed, once settings has it, to save it and show it
