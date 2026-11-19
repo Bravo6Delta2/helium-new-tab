@@ -1,3 +1,6 @@
+import { KINDS, KEEP_DAYS, dayOf } from "./src/shared.js";
+import { classify, indexTrackers } from "./src/trackers.js";
+
 // Counts the requests uBlock Origin blocks. Extensions can't read each other's storage, but
 // every extension watching webRequest sees a request another one cancelled, with this error.
 const BLOCKED = "net::ERR_BLOCKED_BY_CLIENT";
@@ -7,30 +10,12 @@ const STAND_IN = /^chrome-extension:\/\/[a-p]{32}\/web_accessible_resources\//;
 // Disconnect's list (CC BY-NC-SA 4.0) says which company a domain belongs to and what it does
 const TRACKER_LIST = "https://raw.githubusercontent.com/disconnectme/disconnect-tracking-protection/master/services.json";
 const LIST_TTL = 7 * 24 * 3600_000;
-// Its categories, folded into the page's three. The rest (Content, Anti-fraud,
-// ConsentManagers) and unlisted domains count as "other".
-const KIND = {
-  Advertising: "ads",
-  Analytics: "trackers", Social: "trackers", Cryptomining: "trackers", Email: "trackers", EmailAggressive: "trackers",
-  FingerprintingInvasive: "trackers", FingerprintingGeneral: "trackers",
-};
-const RANK = { ads: 0, trackers: 1, other: 2 };
-// A day's sources hold counts per kind in this order, as a company like Google can be both.
-// app.js reads them in the same order (its KINDS), so keep the two alike.
-const KINDS = ["trackers", "ads", "other"];
 
-// Storage: "start" is the day counting began, and each day has its own "day:YYYY-MM-DD" key
-// holding { trackers, ads, other, sources }. Only today changes. The page shows up to 90 days.
-// "historyRemoved" is when history was last deleted, and "activity" the page's browsing
-// activity cache (see app.js), which the worker drops whenever history is deleted.
-// "trackerList" is { at, names: [company], index: { domain: companyIndex * 3 + kind } }, with
-// kind in KINDS order. A plain object of numbers parses about twice as fast as domain/company
-// pairs, and each name is stored once.
-const KEEP_DAYS = 90;
+// Storage is described in src/shared.js. The worker also keeps "trackerList", the list as
+// indexTrackers makes it plus "at", when it was fetched. The page shows up to KEEP_DAYS days.
 const days = {};              // the days touched since the worker started
 let list = null;
 
-const dayOf = (t) => new Date(t).toLocaleDateString("en-CA"); // YYYY-MM-DD, local time
 const today = () => dayOf(Date.now());
 
 // Chrome stops the worker after 30 s idle and starts it for the next event, blocked or not.
@@ -83,46 +68,11 @@ async function updateTrackerList() {
   try {
     const res = await fetch(TRACKER_LIST, { signal: AbortSignal.timeout(20_000) });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const best = new Map(); // domain -> [kind, company]
-    for (const [category, entries] of Object.entries((await res.json()).categories)) {
-      const kind = KIND[category] ?? "other";
-      for (const entry of entries) for (const [company, sites] of Object.entries(entry)) {
-        // Besides its URL -> domains, an entry can hold flags like "dnt": "eff"
-        for (const domains of Object.values(sites)) if (Array.isArray(domains)) for (const d of domains) {
-          // A domain can be in several categories. Ads win, then trackers.
-          const had = best.get(d);
-          if (!had || RANK[kind] < RANK[had[0]]) best.set(d, [kind, company]);
-        }
-      }
-    }
-    const names = [], ids = new Map(), index = {};
-    for (const [d, [kind, company]] of best) {
-      let id = ids.get(company);
-      if (id === undefined) ids.set(company, id = names.push(company) - 1);
-      index[d] = id * 3 + KINDS.indexOf(kind);
-    }
-    list = { at: Date.now(), names, index };
+    list = { at: Date.now(), ...indexTrackers(await res.json()) };
     await chrome.storage.local.set({ trackerList: list });
   } catch {
     // Unlisted until the next time the worker starts
   }
-}
-
-function classify(host) {
-  // Every candidate has a dot, so none can match a property like "constructor"
-  if (list) for (let h = host; h.includes("."); h = h.slice(h.indexOf(".") + 1)) {
-    const code = list.index[h];
-    if (code !== undefined) return [KINDS[code % 3], list.names[Math.floor(code / 3)]];
-  }
-  return ["other", baseDomain(host)];
-}
-
-// Close enough to the registrable domain for a label: example.com, example.co.uk
-function baseDomain(host) {
-  if (/^[\d.]+$|:/.test(host)) return host;
-  const parts = host.split(".");
-  const n = parts.length > 2 && parts.at(-1).length === 2 && parts.at(-2).length <= 3 ? 3 : 2;
-  return parts.slice(-n).join(".");
 }
 
 // Allowed in incognito, the worker also sees incognito tabs' requests, which aren't counted.
@@ -148,7 +98,7 @@ async function countBlocked(details) {
   if (details.tabId < 0) return;
   if (await isIncognito(details.tabId)) return;
   await init();
-  const [kind, name] = classify(new URL(details.url).hostname);
+  const [kind, name] = classify(new URL(details.url).hostname, list);
   const day = today();
   const entry = await dayEntry(day);
   entry[kind]++;

@@ -171,7 +171,7 @@
     font-variant-numeric: tabular-nums;
   }
   .date { margin-top: 14px; font-size: clamp(18px, 2.8vh, 24px); color: var(--secondary); }
-  /* app.js fills these, and the browser can paint once before it runs. Reserving a
+  /* src/clock.js fills these, and the browser can paint once before it runs. Reserving a
      line each keeps the search bar from jumping on reload. */
   .time, .date { min-height: 1lh; }
   .time .ampm { margin-left: 0.12em; font-size: 0.32em; letter-spacing: 0; color: var(--secondary); }
@@ -370,7 +370,7 @@
     grid-area: dock;
     display: flex; align-items: flex-end; gap: 8px;
     pointer-events: auto;
-    /* Shown by app.js once the pills have their numbers */
+    /* Shown by src/main.js once the pills have their numbers */
     opacity: 0; visibility: hidden;
     transition: opacity 0.2s, visibility 0s linear 0.2s;
   }
@@ -668,6 +668,6 @@
 </dialog>
 
 <script src="shimmer.js"></script>
-<script src="app.js"></script>
+<script type="module" src="src/main.js"></script>
 </body>
 </html>

@@ -36,7 +36,7 @@ Open Settings with the gear button or <kbd>⌥</kbd> <kbd>,</kbd> (<kbd>Alt</kbd
 
 **Search** also adds your own search engines and bangs. Give each a web address with `%s` where the search terms go, like `https://claude.ai/new?q=%s` for `!cl`. A bang without `%s` always opens the same page. Click one to edit it.
 
-Anything else is set in the `CONFIG` object at the top of [`app.js`](app.js), including:
+Anything else is set in the `CONFIG` object in [`src/config.js`](src/config.js), including:
 
 - **Built-in search engines.** Add more as `Name: "https://example.com/search?q=%s"`.
 - **Default bangs.** These take priority over Helium's list, and ones added in Settings take priority over these:
@@ -81,11 +81,31 @@ Browsing activity is read from the browser's own history and cleared when you de
 | File | Contents |
 | --- | --- |
 | `index.html` | Page markup and styles |
-| `app.js` | Clock, search, weather, world clocks, activity, uBlock stats and settings |
 | `background.js` | Service worker that counts uBlock Origin's blocked requests |
 | `shimmer.js` | Prism's gradient shimmer, ported to plain WebGL2 |
+| `src/main.js` | Starts each part of the page, and passes on settings changes |
+| `src/config.js` | Defaults (see [Settings](#settings)) |
+| `src/clock.js`, `search.js`, `weather.js`, `activity.js`, `ublock.js`, `settings-dialog.js` | One part of the page each |
+| `src/query.js`, `settings.js`, `time.js`, `weather-logic.js`, `report.js`, `trackers.js` | The logic behind them, with no DOM or `chrome.*`, so the tests can run it |
+| `src/shared.js` | What `background.js` stores and the page reads |
+| `src/page.js`, `panels.js`, `html.js`, `icons.js` | What the parts share: the live settings, panels, escaped templates and icons |
+| `test/` | Tests |
 | `fonts/` | Instrument Sans |
 | `icons/` | Icons |
+
+## Development
+
+There's no build step: the page and the worker are native ES modules, loaded as they are. Reload the extension at `chrome://extensions` after a change.
+
+Run the tests with Node 22.12 or later, no install needed:
+
+```sh
+node --test
+```
+
+Modules don't load from `file://`, so to try the page outside the extension, serve the folder (`python3 -m http.server`) and open `http://localhost:8000`. Without the extension APIs it has no suggestions from history, activity or uBlock stats.
+
+Settings and the weather cache live in `localStorage`, which can be read before the first paint. What the worker writes, and the activity cache it clears when history is deleted, live in `chrome.storage.local`.
 
 ## Credits
 

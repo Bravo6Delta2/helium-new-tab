@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Clock, search with bangs, suggestions and tab switching, weather, world clocks, browsing activity and uBlock Origin stats.",
   "chrome_url_overrides": { "newtab": "index.html" },
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "type": "module" },
   "permissions": ["storage", "webRequest", "history", "bookmarks", "favicon", "tabs"],
   "host_permissions": ["<all_urls>"]
 }
