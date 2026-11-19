@@ -58,9 +58,14 @@ const validTz = (tz) => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: tz }); return true; } catch { return false; }
 };
 
-// The engines in CONFIG, then yours from Settings
+// The engines in CONFIG, then yours from Settings. Names in that order, as an object puts
+// keys like "1" first.
+const engineNames = (s = settings) => [...Object.keys(CONFIG.search.engines), ...s.engines.map((e) => e.name)];
 const allEngines = (s = settings) =>
   ({ ...CONFIG.search.engines, ...Object.fromEntries(s.engines.map((e) => [e.name, e.url])) });
+// CONFIG's, or the first engine if that one's gone
+const defaultEngine = () =>
+  Object.hasOwn(CONFIG.search.engines, CONFIG.search.engine) ? CONFIG.search.engine : Object.keys(CONFIG.search.engines)[0];
 
 // Two slots each, left and right. Once saved, these win over CONFIG.
 const SLOTS = ["Left", "Right"];
@@ -78,7 +83,7 @@ function readSettings() {
   s.engines = (Array.isArray(s.engines) ? s.engines : []).filter((e) => str(e?.name) && str(e.url));
   s.bangs = (Array.isArray(s.bangs) ? s.bangs : []).filter((b) => str(b?.t) && str(b.url) && typeof b.name === "string");
   // An engine since removed falls back to the first one
-  if (!Object.hasOwn(allEngines(s), s.engine)) s.engine = Object.keys(CONFIG.search.engines)[0];
+  if (!Object.hasOwn(allEngines(s), s.engine)) s.engine = defaultEngine();
   return s;
 }
 const settings = readSettings();
@@ -251,8 +256,9 @@ function ownBang(key) {
 
 function lookupBang(key) {
   const own = ownBang(key);
-  // One without %s always opens that page, as is
-  if (own) return { s: own[0], u: own[1].replaceAll("%s", "{searchTerms}"), f: own[1].includes("%s") ? undefined : 0 };
+  // Terms encoded the way engines' are, so "New York" in a path stays "New%20York". One
+  // without %s always opens that page, as is.
+  if (own) return { s: own[0], u: own[1].replaceAll("%s", "{searchTerms}"), f: own[1].includes("%s") ? FLAG.ENCODE | FLAG.OPEN_SNAP_DOMAIN : 0 };
   return heliumBangs?.get(key) || null;
 }
 
@@ -262,6 +268,8 @@ function runBang(bang, terms) {
     // With no terms, Kagi opens the site's root (snap domain) or the search page's path (base path)
     try {
       const url = new URL(bang.u.replaceAll("{searchTerms}", ""));
+      // A chrome:// or file:// page has no site to snap to, and opens as is
+      if (!/^https?:$/.test(url.protocol)) return url.href;
       return f & FLAG.OPEN_SNAP_DOMAIN ? url.origin : f & FLAG.OPEN_BASE_PATH ? url.origin + url.pathname : url.href;
     } catch {
       return null;
@@ -288,7 +296,7 @@ function resolve(raw) {
     // Local servers and routers rarely have certificates
     return (/^(localhost|\d{1,3}(\.\d{1,3}){3})\b/i.test(text) ? "http://" : "https://") + text;
   }
-  return fill(allEngines()[settings.engine], text);
+  return fill(allEngines()[settings.engine] ?? CONFIG.search.engines[defaultEngine()], text);
 }
 
 function updateBangHint() {
@@ -319,12 +327,17 @@ function go(url, newTab) {
 // Like the address bar's "Switch to tab". This new tab closes, unless it has been used to
 // go somewhere and has a back button to keep.
 async function switchTab(tab) {
+  let t;
   try {
-    await chrome.tabs.update(tab.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true });
+    // Closed, or gone somewhere else, since it was suggested: the page opens here instead
+    const live = await chrome.tabs.get(tab.id);
+    if ((live.pendingUrl || live.url) !== tab.url) throw 0;
+    t = await chrome.tabs.update(tab.id, { active: true });
   } catch {
-    return go(tab.url); // closed since it was suggested
+    return go(tab.url);
   }
+  // Its window now, as it may have been moved to another since
+  await chrome.windows.update(t.windowId, { focused: true }).catch(() => {});
   if (history.length <= 1) chrome.tabs.getCurrent().then((t) => t && chrome.tabs.remove(t.id)).catch(() => {});
 }
 
@@ -333,6 +346,8 @@ q.addEventListener("keydown", async (e) => {
   if (e.isComposing || e.keyCode === 229) return;
   if ((e.key === "ArrowDown" || e.key === "ArrowUp") && rows.length) {
     e.preventDefault();
+    // Not into rows still showing for what was typed before, which are about to change
+    if (rowsFor !== q.value) return;
     // -1 is the text as typed, between the last row and the first
     const n = rows.length + 1;
     active = ((active + 1 + (e.key === "ArrowDown" ? 1 : -1) + n) % n) - 1;
@@ -349,7 +364,7 @@ q.addEventListener("keydown", async (e) => {
     if (rows[active]) return pick(rows[active], e.metaKey || e.ctrlKey);
     const text = q.value;
     // The list may still be loading. Give it a moment.
-    if (!heliumBangs && findBang(text)) {
+    if (!heliumBangs && findBang(text) && !ownBang(findBang(text).key)) {
       await Promise.race([loadHeliumBangs(), new Promise((r) => setTimeout(r, 1500))]);
       // Cleared or edited while waiting: that's a new search, with its own Enter
       if (q.value !== text) return;
@@ -364,7 +379,7 @@ q.addEventListener("keydown", async (e) => {
 // Nothing is picked until an arrow key says so, so Enter still searches what was typed.
 const suggest = $("suggest");
 const SUGGEST_MAX = 6;
-let rows = [], active = -1, suggestSeq = 0;
+let rows = [], rowsFor = "", active = -1, suggestSeq = 0;
 
 // The "!yt" the caret is in, if any
 function caretBang() {
@@ -383,9 +398,9 @@ function matchBangs(prefix) {
   const found = [];
   for (const b of heliumBangList) {
     let t = null;
-    for (const x of b.ts) if (x.startsWith(prefix) && (!t || x.length < t.length)) t = x;
-    // Your own bangs win over Helium's for the same trigger
-    if (t && !ownBang(t)) found.push({ t, s: b.s, u: b.u, n: b.ts.length });
+    // Your own bangs win over Helium's for the same trigger, which leaves its other ones
+    for (const x of b.ts) if (x.startsWith(prefix) && (!t || x.length < t.length) && !ownBang(x)) t = x;
+    if (t) found.push({ t, s: b.s, u: b.u, n: b.ts.length });
   }
   return [...own, ...found]
     .sort((a, b) => (b.t === prefix) - (a.t === prefix) || a.t.length - b.t.length || b.n - a.n)
@@ -394,10 +409,12 @@ function matchBangs(prefix) {
 }
 
 // Result pages of the engines in Settings, which would crowd out the pages themselves.
-// One like "https://%s.example.com" has no prefix to tell its pages by.
+// Only engines with the terms in the query: before a path's "%s", as in
+// "https://en.wikipedia.org/wiki/%s", is every page of the site. What follows the terms,
+// like "&view=search", has to be there too.
 const isSearchPage = (url) => Object.values(allEngines()).some((e) => {
-  const prefix = e.slice(0, e.indexOf("%s"));
-  return URL.canParse(prefix) && url.startsWith(prefix);
+  const i = e.indexOf("%s"), prefix = e.slice(0, i);
+  return /[?#]/.test(prefix) && url.startsWith(prefix) && url.slice(i).includes(e.slice(i + 2));
 });
 // The host without www, and with the port if asked
 const hostOf = (url, port = false) => {
@@ -447,8 +464,8 @@ async function matchPages(text) {
 }
 
 async function updateSuggestions() {
-  const seq = ++suggestSeq;
-  const text = q.value.trim(), token = caretBang();
+  const seq = ++suggestSeq, value = q.value;
+  const text = value.trim(), token = caretBang();
   let next = [];
   if (token) next = matchBangs(token.prefix);
   // Opened as a plain file:// page there's no history to search
@@ -456,6 +473,7 @@ async function updateSuggestions() {
   // A newer keystroke may have finished first
   if (seq !== suggestSeq || document.activeElement !== q) return;
   rows = next;
+  rowsFor = value;
   active = -1;
   paintSuggestions();
 }
@@ -523,6 +541,7 @@ q.addEventListener("keyup", (e) => { if (["ArrowLeft", "ArrowRight", "Home", "En
 // mousedown would blur the box and clear the list before the click lands
 suggest.addEventListener("mousedown", (e) => e.preventDefault());
 suggest.addEventListener("mousemove", (e) => {
+  if (rowsFor !== q.value) return;
   const i = Number(e.target.closest("[data-i]")?.dataset.i ?? active);
   if (i !== active) { active = i; paintSuggestions(); }
 });
@@ -1267,7 +1286,11 @@ window.addEventListener("storage", (e) => {
   const changed = Object.keys(next).filter((k) => JSON.stringify(next[k]) !== JSON.stringify(settings[k]));
   Object.assign(settings, next);
   for (const kind of changed) applySettings(kind);
-  if (changed.length && dialog.open) { renderGeneral(); renderSlots(); renderSearch(); }
+  // Only what changed, as redrawing a list loses the focus in it
+  if (!dialog.open) return;
+  if (changed.some((k) => k === "hour12" || k === "fahrenheit")) renderGeneral();
+  if (changed.some((k) => k === "weather" || k === "clocks")) renderSlots();
+  if (changed.some((k) => k === "engine" || k === "engines" || k === "bangs")) renderSearch();
 });
 
 function saveSettings(kind) {
@@ -1282,15 +1305,26 @@ function applySettings(kind) {
   else if (kind === "bangs") updateBangHint();
 }
 
-// General, or Search: the engine and your own engines and bangs
+// General, or Search: the engine and your own engines and bangs. Tabs, so only the
+// selected one is in the Tab order and the arrow keys move between them.
 const tabs = $("settings-tabs");
 function showTab(name) {
-  for (const b of tabs.children) b.setAttribute("aria-pressed", b.dataset.tab === name);
+  for (const b of tabs.children) {
+    b.setAttribute("aria-selected", b.dataset.tab === name);
+    b.tabIndex = b.dataset.tab === name ? 0 : -1;
+  }
   for (const pane of dialog.querySelectorAll("[data-pane]")) pane.hidden = pane.dataset.pane !== name;
 }
 tabs.addEventListener("click", (e) => {
   const b = e.target.closest("[data-tab]");
   if (b) showTab(b.dataset.tab);
+});
+tabs.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  const next = tabs.querySelector('[aria-selected="false"]');
+  showTab(next.dataset.tab);
+  next.focus();
 });
 showTab("general");
 
@@ -1311,8 +1345,8 @@ function renderGeneral() {
 }
 
 // The search engine, and your own engines and bangs. Each list is edited with the form
-// under it: a row loads into the form, and saving one with the same name or trigger
-// replaces it.
+// under it: a row loads into the form, which then saves over that row (form.dataset.editing
+// holds its name or trigger) until it's saved or emptied.
 const engine = $("engine"), engineForm = $("engine-add"), bangForm = $("bang-add");
 $("engine-field").insertAdjacentHTML("beforeend", icon("chevron-down", 16));
 engine.addEventListener("change", () => { settings.engine = engine.value; saveSettings("engine"); });
@@ -1326,10 +1360,13 @@ const entry = (i, key, name, url) => `
   </li>`;
 
 function renderSearch() {
-  engine.innerHTML = Object.keys(allEngines()).map((name) => `<option>${esc(name)}</option>`).join("");
+  // A value of its own, as an option's text has its spaces collapsed
+  engine.innerHTML = engineNames().map((name) => `<option value="${esc(name)}">${esc(name)}</option>`).join("");
   engine.value = settings.engine;
   $("engines-list").innerHTML = settings.engines.map((e, i) => entry(i, e.name, "", e.url)).join("");
   $("bangs-list").innerHTML = settings.bangs.map((b, i) => entry(i, "!" + b.t, b.name, b.url)).join("");
+  // A name refused as taken may not be any more
+  for (const input of dialog.querySelectorAll(".add input")) input.setCustomValidity("");
   for (const form of [engineForm, bangForm]) labelSubmit(form);
 }
 
@@ -1350,28 +1387,39 @@ function templateError(url, needTerms) {
   return "";
 }
 
-// What a form's key field holds, and the saved entry it would replace
+// What a form's key field holds
 const formKey = {
-  engines: (f) => f.elements.label.value.trim(),
+  engines: (f) => f.elements.label.value.trim().replace(/\s+/g, " "),
   bangs: (f) => f.elements.trigger.value.trim().replace(/^!/, "").toLowerCase(),
 };
-const matches = {
-  engines: (key) => (e) => e.name === key,
-  bangs: (key) => (b) => b.t === key,
-};
-// "Save" when it replaces one, "Add" otherwise
+// And a saved entry's
+const keyOf = { engines: (e) => e.name, bangs: (b) => b.t };
+// The row being edited. Gone when another tab has removed it, and then it's added again.
+const editingIndex = (form) =>
+  "editing" in form.dataset ? settings[form.dataset.kind].findIndex((x) => keyOf[form.dataset.kind](x) === form.dataset.editing) : -1;
+// "Save" while editing a row, "Add" otherwise
 function labelSubmit(form) {
-  const kind = form.dataset.kind;
-  form.querySelector("[type=submit]").textContent = settings[kind].some(matches[kind](formKey[kind](form))) ? "Save" : "Add";
+  form.querySelector("[type=submit]").textContent = "editing" in form.dataset ? "Save" : "Add";
+}
+function resetForm(form) {
+  form.reset();
+  delete form.dataset.editing;
+  labelSubmit(form);
 }
 
-function saveEntry(form, item) {
+// Over the row being edited, or as a new one. A name or trigger another row has is refused.
+function saveEntry(form, item, keyInput, key) {
   const kind = form.dataset.kind, list = settings[kind];
-  const i = list.findIndex(matches[kind](formKey[kind](form)));
+  const i = editingIndex(form), taken = list.findIndex((x) => keyOf[kind](x) === key);
+  if (taken !== -1 && taken !== i) return invalid(keyInput, `${kind === "bangs" ? "!" + key : key} is already in your list. Click it there to edit it.`);
   if (i === -1) list.push(item);
-  else list[i] = item;
+  else {
+    // The engine in use keeps being used under its new name
+    if (kind === "engines" && list[i].name === settings.engine) settings.engine = item.name;
+    list[i] = item;
+  }
   saveSettings(kind);
-  form.reset();
+  resetForm(form);
   renderSearch();
 }
 
@@ -1383,7 +1431,7 @@ engineForm.addEventListener("submit", (e) => {
   if (Object.hasOwn(CONFIG.search.engines, name)) return invalid(label, `${name} is already in the list`);
   const err = templateError(template, true);
   if (err) return invalid(url, err);
-  saveEntry(engineForm, { name, url: template });
+  saveEntry(engineForm, { name, url: template }, label, name);
 });
 bangForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -1392,30 +1440,44 @@ bangForm.addEventListener("submit", (e) => {
   if (!t || /\s/.test(t)) return invalid(trigger, "One word, like cl");
   const err = templateError(template, false);
   if (err) return invalid(url, err);
-  saveEntry(bangForm, { t, name: label.value.trim() || hostOf(template.replaceAll("%s", "x")), url: template });
+  saveEntry(bangForm, { t, name: label.value.trim() || hostOf(template.replaceAll("%s", "x")) || "!" + t, url: template }, trigger, t);
 });
 
 for (const form of [engineForm, bangForm]) {
   const kind = form.dataset.kind;
+  const inputs = form.querySelectorAll("input"), list = $(kind + "-list");
   form.addEventListener("input", (e) => {
     e.target.setCustomValidity("");
-    labelSubmit(form);
+    // Emptied, it's back to adding a new one
+    if ([...inputs].every((i) => !i.value)) resetForm(form);
   });
-  $(kind + "-list").addEventListener("click", (e) => {
+  list.addEventListener("click", (e) => {
     const edit = e.target.closest("[data-i]"), remove = e.target.closest("[data-remove]");
+    // A double click's second click would land on the ✕ of the row moving up into its place
+    if (remove && e.detail > 1) return;
     if (remove) {
-      const [gone] = settings[kind].splice(remove.dataset.remove, 1);
-      // The engine in use falls back to the first one
-      if (kind === "engines" && gone.name === settings.engine) settings.engine = Object.keys(CONFIG.search.engines)[0];
+      const i = Number(remove.dataset.remove);
+      const [gone] = settings[kind].splice(i, 1);
+      // The engine in use falls back to the default
+      if (kind === "engines" && gone.name === settings.engine) settings.engine = defaultEngine();
+      if (form.dataset.editing === keyOf[kind](gone)) resetForm(form);
       saveSettings(kind);
       renderSearch();
+      // Focus stays in the list, on the row that took its place, rather than going back to the top
+      const buttons = list.querySelectorAll("[data-remove]");
+      (buttons[Math.min(i, buttons.length - 1)] ?? inputs[0]).focus();
     } else if (edit) {
       const item = settings[kind][edit.dataset.i];
       const { elements: f } = form;
       if (kind === "engines") f.label.value = item.name;
-      else { f.trigger.value = item.t; f.label.value = item.name; }
+      else {
+        f.trigger.value = item.t;
+        // A name that was only the site's is left out, to follow the address if it changes
+        f.label.value = item.name === hostOf(item.url.replaceAll("%s", "x")) ? "" : item.name;
+      }
       f.url.value = item.url;
-      for (const input of form.querySelectorAll("input")) input.setCustomValidity("");
+      for (const input of inputs) input.setCustomValidity("");
+      form.dataset.editing = keyOf[kind](item);
       labelSubmit(form);
       f.url.focus();
     }
